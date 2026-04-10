@@ -1,0 +1,43 @@
+# Betting Configuration
+# Loaded by mlb/betting.py and mlb/live.py
+
+kalshi:
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  key_id_env: "KALSHI_KEY_ID"              # set in .env
+  private_key_path: "~/.kalshi/private_key.pem"
+  series_ticker: "KXMLB"                   # MLB totals series
+  dry_run: true                            # ALWAYS true until backtesting validates edge
+
+polymarket:
+  gamma_api_url: "https://gamma-api.polymarket.com"
+  # No auth required for read-only market data
+
+sizing:
+  kelly_multiplier: 0.25                  # fractional Kelly — never change to 1.0
+  max_bet_pct: 0.05                       # max 5% of bankroll per game
+  max_open_positions: 3                   # max simultaneous open bets
+  initial_bankroll: 1000.0               # starting bankroll for simulation
+
+filters:
+  min_edge: 0.03                          # minimum edge vs Kalshi mid-price
+  min_open_interest: 1000.0              # minimum Kalshi open interest in dollars
+  min_volume_24h: 500.0                  # minimum 24h volume
+  skip_first_n_games: 20                 # skip first 20 games of season (small sample)
+
+clv:
+  track: true
+  benchmark: "kalshi_closing"            # primary CLV benchmark
+  secondary_benchmark: "sbr_pinnacle_closing"
+
+backtest:
+  start_date: "2021-04-01"
+  end_date: "2024-10-01"
+  odds_source: "sbr_pinnacle"            # use Pinnacle closing line as market proxy
+  sensitivity_thresholds: [0.02, 0.03, 0.05]
+
+alerts:
+  # Paper trading alert thresholds (dry_run=true)
+  ev_threshold: 0.03                     # alert when EV > this
+  price_move_threshold: 0.04             # alert when Kalshi price moves > 4 cents
+  # Set to false to disable console alerts
+  console: true

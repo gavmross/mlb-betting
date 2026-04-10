@@ -1,0 +1,70 @@
+name: Daily MLB Pipeline
+
+on:
+  schedule:
+    - cron: "0 11 * * *"     # 11am UTC = 7am ET — before first pitch
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore database from cache
+        uses: actions/cache@v4
+        with:
+          path: data/mlb.db
+          key: mlb-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            mlb-db-${{ runner.os }}-
+
+      - name: Create data directories
+        run: mkdir -p data/raw/sbr data/raw/kalshi data/models
+
+      - name: Run incremental scrape
+        run: python -m mlb.scraper --incremental
+        env:
+          PYTHONPATH: .
+
+      - name: Fetch weather for today's games
+        run: python -m mlb.weather --incremental
+        env:
+          PYTHONPATH: .
+
+      - name: Fetch today's odds
+        run: python -m mlb.odds_scraper --date today
+        env:
+          PYTHONPATH: .
+
+      - name: Generate predictions
+        run: python -m mlb.pipeline --date today
+        env:
+          PYTHONPATH: .
+          KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+
+      - name: Save database to cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/mlb.db
+          key: mlb-db-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Upload predictions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: predictions-${{ github.run_id }}
+          path: data/mlb.db
+          retention-days: 30

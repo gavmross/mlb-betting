@@ -1,0 +1,120 @@
+# Model Configuration
+# Loaded by mlb/model.py and mlb/features.py
+
+model:
+  baseline:
+    name: poisson_glm
+    class: sklearn.linear_model.PoissonRegressor
+    params:
+      alpha: 1.0
+      max_iter: 300
+
+  primary:
+    name: gradient_boost_poisson
+    class: sklearn.ensemble.GradientBoostingRegressor
+    params:
+      loss: poisson          # NEVER change to squared_error
+      n_estimators: 300
+      max_depth: 3
+      learning_rate: 0.05
+      subsample: 0.8
+      min_samples_leaf: 20
+      random_state: 42
+
+cross_validation:
+  strategy: TimeSeriesSplit
+  n_splits: 5
+  gap: 162                   # one full season buffer between train and test
+
+overdispersion:
+  threshold: 1.2             # if var(residuals)/mean(lambda) > this, flag NegBinom upgrade
+
+# Feature groups active in the model
+# Set enabled: false to exclude a group during experiments
+feature_groups:
+
+  starting_pitchers:
+    enabled: true
+    features:
+      - home_sp_siera_season
+      - away_sp_siera_season
+      - home_sp_fip_season
+      - away_sp_fip_season
+      - home_sp_era_l3
+      - away_sp_era_l3
+      - home_sp_k9_season
+      - away_sp_k9_season
+      - home_sp_bb9_season
+      - away_sp_bb9_season
+      - home_sp_days_rest
+      - away_sp_days_rest
+      - home_sp_velocity_l3
+      - away_sp_velocity_l3
+      - sp_siera_combined
+      - sp_k9_combined
+
+  team_offense:
+    enabled: true
+    features:
+      - home_ops_10d
+      - away_ops_10d
+      - home_woba_10d
+      - away_woba_10d
+      - home_wrc_plus
+      - away_wrc_plus
+      - home_k_pct_10d
+      - away_k_pct_10d
+      - ops_combined
+      - woba_combined
+      - k_pct_combined
+
+  bullpen:
+    enabled: true
+    features:
+      - home_bullpen_era_7d
+      - away_bullpen_era_7d
+      - home_bullpen_era_30d
+      - away_bullpen_era_30d
+      - home_bullpen_ip_7d
+      - away_bullpen_ip_7d
+
+  park_factors:
+    enabled: true
+    features:
+      - park_run_factor
+      - park_hr_factor
+      - park_elevation_ft
+      - is_dome
+
+  weather:
+    enabled: true
+    features:
+      - temp_f
+      - wind_speed_mph
+      - wind_dir_out
+      - wind_dir_in
+      - wind_dir_cross
+      - precip_prob
+      - humidity
+      - is_night_game
+
+  market_signal:
+    enabled: true             # only available for 2021+ (SBR coverage)
+    features:
+      - total_line_open
+      - line_movement
+
+  team_strength:
+    enabled: true
+    features:
+      - elo_home
+      - elo_away
+      - win_pct_10d_home
+      - win_pct_10d_away
+      - run_diff_pg_season_home
+      - run_diff_pg_season_away
+
+training:
+  seasons_train: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+  seasons_backtest: [2021, 2022, 2023, 2024]   # only seasons with SBR odds
+  min_games_per_team: 20                        # drop rows before team has 20 games

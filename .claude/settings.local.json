@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(C:/Users/gavro/OneDrive/Desktop/sports/mlb/.venv/Scripts/pip.exe install:*)",
+      "Bash(cmd:*)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(/c/Users/gavro/OneDrive/Desktop/sports/mlb/.venv/Scripts/pip install:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.kalshi.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(python -c \"import pykalshi; help\\(pykalshi\\)\")",
+      "Bash(python -c ':*)",
+      "Bash(python:*)",
+      "Bash(pip show:*)",
+      "Bash(where ruff:*)",
+      "Bash(echo \"PID: $!\")",
+      "Skill(update-config)",
+      "Bash(.venv/Scripts/python.exe -c \"import sklearn, joblib; print\\('sklearn OK'\\); print\\('joblib OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import sklearn, joblib, scipy, numpy, pandas, matplotlib; print\\('All core imports OK'\\)\")",
+      "Bash(.venv/Scripts/pip.exe install:*)",
+      "Bash(.venv/Scripts/pip.exe --version)",
+      "Bash(.venv/Scripts/python.exe --version)",
+      "Bash(.venv/Scripts/python.exe -m pip list)",
+      "Bash(.venv/Scripts/python.exe -m pip install scikit-learn joblib statsmodels pykalshi sbrscrape openmeteo-requests optuna shap ruff pytest ftfy python-dotenv)",
+      "Bash(.venv/Scripts/python.exe -c ':*)",
+      "Bash(git init:*)",
+      "Bash(git --version)",
+      "Bash(gh auth:*)",
+      "Bash(gh repo:*)",
+      "Bash(git remote:*)",
+      "Bash(git branch:*)"
+    ]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "mcpServers": {
+    "optuna": {
+      "command": "uvx",
+      "args": [
+        "optuna-mcp",
+        "--storage",
+        "sqlite:///optuna_studies/mlb.db"
+      ]
+    },
+    "sqlite": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sqlite",
+        "--db-path",
+        "./data/mlb.db"
+      ]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:\\Users\\gavro\\OneDrive\\Desktop\\sports\\mlb"
+      ]
+    },
+    "jupyter": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@datalayer/jupyter-mcp-server"
+      ]
+    }
+  }
+}
