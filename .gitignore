@@ -1,6 +1,8 @@
 # ── Database ──────────────────────────────────────────────────────────────────
 data/mlb.db
 data/mlb_backup_*.db
+notebooks/data/mlb.db
+**/*.db
 
 # ── Raw data cache (large, regenerable) ──────────────────────────────────────
 data/raw/
