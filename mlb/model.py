@@ -30,6 +30,7 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import PoissonRegressor
 from sklearn.metrics import d2_tweedie_score, mean_poisson_deviance
@@ -117,6 +118,92 @@ def make_gbr_poisson(
         l2_regularization=l2_regularization,
         random_state=random_state,
     )
+
+
+# ── NegBinom GLM wrapper ──────────────────────────────────────────────────────
+
+
+class NegBinomGLMWrapper:
+    """
+    Sklearn-compatible wrapper around statsmodels NegBinom GLM.
+
+    Handles scaling internally so the calling code has a uniform fit/predict
+    interface identical to PoissonRegressor and HistGradientBoostingRegressor.
+
+    Parameters
+    ----------
+    alpha : float
+        NegBinom dispersion parameter.  var(y) = μ + alpha·μ².
+        Estimate with :func:`mlb.calibration.estimate_alpha` before fitting.
+    """
+
+    def __init__(self, alpha: float = 1.0) -> None:
+        self.alpha = alpha
+        self._scaler: StandardScaler = StandardScaler()
+        self._model: Any | None = None
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> NegBinomGLMWrapper:
+        """
+        Fit the NegBinom GLM.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Feature matrix (nulls filled before calling).
+        y : pd.Series
+            Target run counts.
+
+        Returns
+        -------
+        NegBinomGLMWrapper
+            self
+        """
+        X_sc = self._scaler.fit_transform(X.fillna(0.0))
+        X_sm = sm.add_constant(X_sc, has_constant="add")
+        self._model = sm.GLM(
+            y.values,
+            X_sm,
+            family=sm.families.NegativeBinomial(alpha=self.alpha),
+        ).fit(disp=False)
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """
+        Predict expected run counts (μ).
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+
+        Returns
+        -------
+        np.ndarray
+            Predicted μ values, clipped to [0.01, 30].
+        """
+        if self._model is None:
+            raise RuntimeError("Call fit() before predict()")
+        X_sc = self._scaler.transform(X.fillna(0.0))
+        X_sm = sm.add_constant(X_sc, has_constant="add")
+        return np.clip(self._model.predict(X_sm), 0.01, 30.0)
+
+
+def make_negbinom_glm(alpha: float = 1.0) -> NegBinomGLMWrapper:
+    """
+    Negative Binomial GLM — use when walk-forward dispersion ratio > 1.2.
+
+    Alpha should be estimated from training data via
+    :func:`mlb.calibration.estimate_alpha` before each fold.
+
+    Parameters
+    ----------
+    alpha : float
+        Dispersion parameter.
+
+    Returns
+    -------
+    NegBinomGLMWrapper
+    """
+    return NegBinomGLMWrapper(alpha=alpha)
 
 
 # ── Data preparation ──────────────────────────────────────────────────────────
@@ -231,7 +318,9 @@ def walk_forward_cv(
     gap : int
         Minimum gap (rows) between train and test sets. 162 ≈ one season.
     model_type : str
-        'glm' for PoissonRegressor, 'gbr' for GradientBoostingRegressor.
+        'glm' for PoissonRegressor, 'gbr' for HistGradientBoostingRegressor,
+        'negbinom' for NegBinomGLMWrapper (requires statsmodels).
+        For 'negbinom', alpha is estimated per fold from Poisson GLM residuals.
     feature_cols : list[str] or None
 
     Returns
@@ -262,12 +351,27 @@ def walk_forward_cv(
         if model_type == "glm":
             m_home = make_poisson_glm()
             m_away = make_poisson_glm()
+            m_home.fit(X_train, y_home_train)
+            m_away.fit(X_train, y_away_train)
+        elif model_type == "negbinom":
+            from mlb.calibration import estimate_alpha
+
+            # Estimate alpha per fold from Poisson GLM residuals on training data
+            glm_alpha_h = make_poisson_glm()
+            glm_alpha_a = make_poisson_glm()
+            glm_alpha_h.fit(X_train, y_home_train)
+            glm_alpha_a.fit(X_train, y_away_train)
+            alpha_h = estimate_alpha(y_home_train.values, glm_alpha_h.predict(X_train))
+            alpha_a = estimate_alpha(y_away_train.values, glm_alpha_a.predict(X_train))
+            m_home = make_negbinom_glm(alpha=alpha_h)
+            m_away = make_negbinom_glm(alpha=alpha_a)
+            m_home.fit(X_train, y_home_train)
+            m_away.fit(X_train, y_away_train)
         else:
             m_home = make_gbr_poisson()
             m_away = make_gbr_poisson()
-
-        m_home.fit(X_train, y_home_train)
-        m_away.fit(X_train, y_away_train)
+            m_home.fit(X_train, y_home_train)
+            m_away.fit(X_train, y_away_train)
 
         lam_home = m_home.predict(X_test)
         lam_away = m_away.predict(X_test)
@@ -284,7 +388,7 @@ def walk_forward_cv(
         disp_home = check_overdispersion(y_home_test.values, lam_home)
         disp_away = check_overdispersion(y_away_test.values, lam_away)
 
-        result = {
+        result: dict[str, Any] = {
             "fold": fold_idx + 1,
             "train_start": train_dates.min(),
             "train_end": train_dates.max(),
@@ -299,6 +403,9 @@ def walk_forward_cv(
             "disp_home": round(disp_home, 3),
             "disp_away": round(disp_away, 3),
         }
+        if model_type == "negbinom":
+            result["alpha_home"] = round(alpha_h, 6)
+            result["alpha_away"] = round(alpha_a, 6)
         fold_results.append(result)
 
         logger.info(
@@ -306,10 +413,16 @@ def walk_forward_cv(
             "dev_home=%.4f d2_home=%.4f | dev_away=%.4f d2_away=%.4f | "
             "disp_home=%.3f disp_away=%.3f",
             fold_idx + 1,
-            train_dates.min(), train_dates.max(),
-            test_dates.min(), test_dates.max(),
-            dev_home, d2_home, dev_away, d2_away,
-            disp_home, disp_away,
+            train_dates.min(),
+            train_dates.max(),
+            test_dates.min(),
+            test_dates.max(),
+            dev_home,
+            d2_home,
+            dev_away,
+            d2_away,
+            disp_home,
+            disp_away,
         )
 
     # Aggregate
@@ -320,7 +433,7 @@ def walk_forward_cv(
     disps_home = [r["disp_home"] for r in fold_results]
     disps_away = [r["disp_away"] for r in fold_results]
 
-    summary = {
+    summary: dict[str, Any] = {
         "model_type": model_type,
         "n_splits": n_splits,
         "mean_dev_home": round(float(np.mean(devs_home)), 4),
@@ -330,16 +443,26 @@ def walk_forward_cv(
         "mean_disp_home": round(float(np.mean(disps_home)), 3),
         "mean_disp_away": round(float(np.mean(disps_away)), 3),
         "negbinom_recommended": float(np.mean(disps_home)) > 1.2
-            or float(np.mean(disps_away)) > 1.2,
+        or float(np.mean(disps_away)) > 1.2,
     }
+    if model_type == "negbinom":
+        summary["mean_alpha_home"] = round(
+            float(np.mean([r["alpha_home"] for r in fold_results])), 6
+        )
+        summary["mean_alpha_away"] = round(
+            float(np.mean([r["alpha_away"] for r in fold_results])), 6
+        )
 
     logger.info(
         "CV summary (%s): dev_home=%.4f dev_away=%.4f "
         "d2_home=%.4f d2_away=%.4f disp_home=%.3f disp_away=%.3f",
         model_type,
-        summary["mean_dev_home"], summary["mean_dev_away"],
-        summary["mean_d2_home"], summary["mean_d2_away"],
-        summary["mean_disp_home"], summary["mean_disp_away"],
+        summary["mean_dev_home"],
+        summary["mean_dev_away"],
+        summary["mean_d2_home"],
+        summary["mean_d2_away"],
+        summary["mean_disp_home"],
+        summary["mean_disp_away"],
     )
     if summary["negbinom_recommended"]:
         logger.warning(
@@ -422,7 +545,8 @@ def train(
 
     logger.info(
         "Train complete: dev_home=%.4f dev_away=%.4f",
-        train_dev_home, train_dev_away,
+        train_dev_home,
+        train_dev_away,
     )
     return artefact
 
@@ -458,9 +582,7 @@ def predict(
     if artefact is None:
         path = MODEL_DIR / f"{model_type}_poisson_v{MODEL_VERSION}.pkl"
         if not path.exists():
-            raise FileNotFoundError(
-                f"No model artefact at {path} — run --train first"
-            )
+            raise FileNotFoundError(f"No model artefact at {path} — run --train first")
         artefact = joblib.load(path)
 
     df = build_features(start_date=date, end_date=date, db_path=db_path)
@@ -654,8 +776,10 @@ if __name__ == "__main__":
                 f"disp_home={fold['disp_home']:.3f} disp_away={fold['disp_away']:.3f}"
             )
         s = results["summary"]
-        print(f"\nMean: dev_home={s['mean_dev_home']:.4f} dev_away={s['mean_dev_away']:.4f} "
-              f"d2_home={s['mean_d2_home']:.4f} d2_away={s['mean_d2_away']:.4f}")
+        print(
+            f"\nMean: dev_home={s['mean_dev_home']:.4f} dev_away={s['mean_dev_away']:.4f} "
+            f"d2_home={s['mean_d2_home']:.4f} d2_away={s['mean_d2_away']:.4f}"
+        )
         if s["negbinom_recommended"]:
             print("*** NegBinom upgrade recommended (mean dispersion > 1.2) ***")
 
@@ -666,5 +790,8 @@ if __name__ == "__main__":
             print(f"No games found for {date}")
         else:
             write_predictions(preds, model_type=args.model)
-            print(preds[["home_team", "away_team", "lambda_home",
-                          "lambda_away", "predicted_total_runs"]].to_string(index=False))
+            print(
+                preds[
+                    ["home_team", "away_team", "lambda_home", "lambda_away", "predicted_total_runs"]
+                ].to_string(index=False)
+            )
