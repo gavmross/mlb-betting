@@ -30,7 +30,14 @@
       "Bash(gh auth:*)",
       "Bash(gh repo:*)",
       "Bash(git remote:*)",
-      "Bash(git branch:*)"
+      "Bash(git branch:*)",
+      "Bash(git rm:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)",
+      "Bash(cp .claude/settings.local.json /tmp/settings.local.json.bak)",
+      "Bash(rm .claude/settings.local.json)"
     ]
   }
 }
