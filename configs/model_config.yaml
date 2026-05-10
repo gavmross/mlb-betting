@@ -1,120 +1,161 @@
 # Model Configuration
 # Loaded by mlb/model.py and mlb/features.py
 
+# ── Models ────────────────────────────────────────────────────────────────────
 model:
   baseline:
-    name: poisson_glm
+    name: glm_poisson
     class: sklearn.linear_model.PoissonRegressor
     params:
       alpha: 1.0
       max_iter: 300
 
   primary:
-    name: gradient_boost_poisson
-    class: sklearn.ensemble.GradientBoostingRegressor
+    name: hgbr_poisson
+    class: sklearn.ensemble.HistGradientBoostingRegressor
     params:
-      loss: poisson          # NEVER change to squared_error
-      n_estimators: 300
-      max_depth: 3
+      loss: poisson            # NEVER change to squared_error
+      max_iter: 300
+      max_depth: 4
       learning_rate: 0.05
-      subsample: 0.8
       min_samples_leaf: 20
+      l2_regularization: 0.1
       random_state: 42
 
+  binary:
+    name: lgbm_binary
+    class: lightgbm.LGBMClassifier
+    params:
+      objective: binary
+      n_estimators: 500
+      learning_rate: 0.03
+      max_depth: 4
+      num_leaves: 31
+      subsample: 0.8
+      colsample_bytree: 0.8
+      min_child_samples: 30
+      reg_alpha: 0.1
+      reg_lambda: 0.1
+      random_state: 42
+    # Calibrated via isotonic regression on OOF predictions
+    # Artefact: data/models/lgbm_binary_v1.0.0.pkl
+
+# ── Cross-Validation ──────────────────────────────────────────────────────────
 cross_validation:
-  strategy: TimeSeriesSplit
+  strategy: TimeSeriesSplit    # NEVER use KFold or shuffle=True on time series
   n_splits: 5
-  gap: 162                   # one full season buffer between train and test
+  gap: 162                     # one full season buffer prevents season-boundary leakage
 
+# ── Overdispersion ────────────────────────────────────────────────────────────
 overdispersion:
-  threshold: 1.2             # if var(residuals)/mean(lambda) > this, flag NegBinom upgrade
+  threshold: 1.2               # var(residuals)/mean(lambda) > 1.2 → upgrade to NegBinom
+  # Measured: home=2.14, away=2.36 — NegBinom upgrade in calibration.py
 
-# Feature groups active in the model
-# Set enabled: false to exclude a group during experiments
+# ── Training Window ───────────────────────────────────────────────────────────
+training:
+  seasons_train: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+  seasons_backtest: [2021, 2022, 2023, 2024, 2025]  # only seasons with SBR odds
+  min_games_per_team: 20       # drop rows before team has 20 games (cold-start)
+
+# ── Feature Registry ──────────────────────────────────────────────────────────
+# Source of truth: mlb/features.py FEATURE_COLS list (48 features total).
+# Market and Kalshi columns are computed in build_features() but excluded from
+# training to avoid circular signal (line is the benchmark, not a predictor).
 feature_groups:
 
   starting_pitchers:
     enabled: true
+    count: 18
     features:
-      - home_sp_siera_season
-      - away_sp_siera_season
-      - home_sp_fip_season
+      - home_sp_era_season      # season ERA (capped at 13.5)
+      - away_sp_era_season
+      - home_sp_fip_season      # fielding-independent pitching
       - away_sp_fip_season
-      - home_sp_era_l3
-      - away_sp_era_l3
-      - home_sp_k9_season
+      - home_sp_k9_season       # strikeout rate
       - away_sp_k9_season
-      - home_sp_bb9_season
+      - home_sp_bb9_season      # walk rate
       - away_sp_bb9_season
       - home_sp_days_rest
       - away_sp_days_rest
-      - home_sp_velocity_l3
-      - away_sp_velocity_l3
-      - sp_siera_combined
+      - home_sp_era_l3          # ERA over last 3 starts (recent form)
+      - away_sp_era_l3
+      - home_sp_er_pg_l5        # earned runs per start, last 5
+      - away_sp_er_pg_l5
+      - sp_fip_combined         # sum of both SPs
       - sp_k9_combined
+      - sp_era_l3_combined
+      - sp_er_pg_l5_combined
 
   team_offense:
     enabled: true
+    count: 6
     features:
-      - home_ops_10d
+      - home_ops_10d            # rolling 10-game OPS
       - away_ops_10d
-      - home_woba_10d
-      - away_woba_10d
-      - home_wrc_plus
-      - away_wrc_plus
-      - home_k_pct_10d
+      - home_k_pct_10d          # rolling strikeout rate
       - away_k_pct_10d
-      - ops_combined
-      - woba_combined
-      - k_pct_combined
+      - home_runs_10d           # rolling 10-game avg runs scored
+      - away_runs_10d
 
   bullpen:
     enabled: true
+    count: 6
     features:
       - home_bullpen_era_7d
       - away_bullpen_era_7d
       - home_bullpen_era_30d
       - away_bullpen_era_30d
-      - home_bullpen_ip_7d
+      - home_bullpen_ip_7d      # innings pitched (fatigue proxy)
       - away_bullpen_ip_7d
 
   park_factors:
     enabled: true
+    count: 4
     features:
-      - park_run_factor
+      - park_run_factor         # FanGraphs 3yr regressed (Coors=1.26, Petco=0.89)
       - park_hr_factor
-      - park_elevation_ft
+      - park_elevation_ft       # altitude — ball carries farther at Coors
       - is_dome
 
   weather:
     enabled: true
+    count: 8
     features:
       - temp_f
       - wind_speed_mph
-      - wind_dir_out
-      - wind_dir_in
-      - wind_dir_cross
-      - precip_prob
+      - wind_dir_out            # blowing toward outfield (boosts runs)
+      - wind_dir_in             # blowing in from outfield (suppresses runs)
+      - wind_dir_cross_right
+      - wind_dir_cross_left
+      # precip_prob excluded — always NULL from archive API
       - humidity
       - is_night_game
 
-  market_signal:
-    enabled: true             # only available for 2021+ (SBR coverage)
-    features:
-      - total_line_open
-      - line_movement
-
   team_strength:
     enabled: true
+    count: 4
+    features:
+      - home_win_pct_10d
+      - away_win_pct_10d
+      - home_run_diff_pg_season
+      - away_run_diff_pg_season
+
+  elo:
+    enabled: true
+    count: 2
     features:
       - elo_home
       - elo_away
-      - win_pct_10d_home
-      - win_pct_10d_away
-      - run_diff_pg_season_home
-      - run_diff_pg_season_away
 
-training:
-  seasons_train: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
-  seasons_backtest: [2021, 2022, 2023, 2024]   # only seasons with SBR odds
-  min_games_per_team: 20                        # drop rows before team has 20 games
+  # Excluded from FEATURE_COLS — computed but not used as model inputs:
+  excluded:
+    market_signal:
+      reason: >
+        Closing line is the betting benchmark; using it as a predictor of whether
+        total exceeds it is circular. total_line_open, total_line_close, and
+        line_movement are available at inference time for EV calculation.
+    kalshi_cross_signal:
+      reason: >
+        kalshi_fullgame_line, kalshi_f5_line, f5_ratio are 100% NULL for
+        2021-2024 training data (Kalshi MLB data starts 2026-03-31).
+        Will populate for 2026+ live predictions.

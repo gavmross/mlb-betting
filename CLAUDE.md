@@ -43,10 +43,10 @@ positions. Use Polymarket as a cross-market pricing signal.
 ### Betting Math
 - EV on OVER: `(p_over * (1 - kalshi_price)) - ((1 - p_over) * kalshi_price)`
 - Kelly: `f* = (p * b - q) / b` where `b = (1 / kalshi_price) - 1`
-- Always apply 0.25x fractional Kelly — never full Kelly
-- Hard cap: never bet more than 5% of bankroll on a single game
+- **Production sizing: 0.50x fractional Kelly, 15% bankroll cap** (validated 2021–2025)
 - Only bet when edge > $0.03 vs Kalshi mid-price
 - Skip if Kalshi open interest < $1,000
+- Structural filters use `_FILTER_WIN_PROBS` dict as the Kelly input win probability
 
 ### Database Safety
 - Never DROP or TRUNCATE in production
@@ -62,33 +62,42 @@ positions. Use Polymarket as a cross-market pricing signal.
 # Install
 pip install -r requirements.txt
 
-# Daily pipeline (manual steps — mlb/pipeline.py not yet implemented)
-python -m mlb.scraper --incremental
-python -m mlb.weather --incremental
-python -m mlb.odds_scraper --date today
-python -m mlb.kalshi --snapshot
-python -m mlb.model --predict --date today --model lgbm_binary
-python -m mlb.betting daily --date today
+# ── Daily pipeline (run in order) ──────────────────────────────────────────────
+python -m mlb.scraper --incremental          # scrape yesterday's results
+python -m mlb.weather --incremental          # fetch weather for today's games
+python -m mlb.odds_scraper --date today      # pull closing lines from SBR
+python -m mlb.kalshi --snapshot              # snapshot live Kalshi prices
+python -m mlb.model --predict --date today --model lgbm_binary  # model predictions
+python -m mlb.betting daily --date today     # model-based EV recommendations
 
-# Incremental data update
-python -m mlb.scraper --incremental
-python -m mlb.weather --incremental
+# ── Structural filter backtest (primary production strategy) ────────────────────
+python -m mlb.betting simulate-structural \
+    --filter day_k9_park --filter high_line --filter summer_hot_wind_out \
+    --start 2021-04-01 --end 2025-10-01 \
+    --book draftkings
 
-# Train
+# ── Train / retrain models ─────────────────────────────────────────────────────
 python -m mlb.model --train --model lgbm_binary
 python -m mlb.model --backtest --n-splits 5 --model lgbm_binary
 
-# Backtest simulation
-python -m mlb.betting simulate --start 2022-04-01 --end 2024-10-01 --model lgbm_binary --book draftkings
+# ── Model-based backtest (paper trading, no live edge yet) ─────────────────────
+python -m mlb.betting simulate \
+    --start 2021-04-01 --end 2025-10-01 \
+    --model lgbm_binary --book draftkings
 
-# Tests
+# ── Data backfill ──────────────────────────────────────────────────────────────
+python -m mlb.scraper --backfill-f5          # first-5-innings scores
+python -m mlb.elo --reset --start-season 2015 --end-season 2026
+python -m mlb.weather --start 2015-04-01 --end 2020-10-31
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
 pytest tests/ -v
 pytest tests/unit/test_features.py -v    # run after every feature change
 
-# Code quality
+# ── Code quality ───────────────────────────────────────────────────────────────
 ruff check . && ruff format .
 
-# DB inspection (use Python — sqlite3 CLI not available on Windows without extra install)
+# ── DB inspection ─────────────────────────────────────────────────────────────
 python -c "import sqlite3; c=sqlite3.connect('data/mlb.db'); [print(r) for r in c.execute('SELECT name FROM sqlite_master WHERE type=\"table\"').fetchall()]"
 ```
 

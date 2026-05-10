@@ -269,3 +269,69 @@ class TestPassesFilters:
         ok, reason = passes_filters("UNDER", open_interest=2000, current_positions=1)
         assert ok is True
         assert reason == ""
+
+
+# ── structural filter constants ────────────────────────────────────────────────
+
+
+class TestStructuralFilterConstants:
+    """Verify the filter win-rate table and Kelly stake math are internally consistent."""
+
+    def test_filter_win_probs_above_breakeven(self):
+        """Every filter's Kelly input probability must beat -110 break-even (~52.4%)."""
+        from mlb.betting import _FILTER_WIN_PROBS
+
+        breakeven = 110 / 210  # ~0.524
+        for name, p in _FILTER_WIN_PROBS.items():
+            assert p > breakeven, f"{name} win prob {p:.3f} is below break-even {breakeven:.3f}"
+
+    def test_filter_win_probs_below_one(self):
+        from mlb.betting import _FILTER_WIN_PROBS
+
+        for name, p in _FILTER_WIN_PROBS.items():
+            assert 0 < p < 1, f"{name} has invalid probability {p}"
+
+    def test_half_kelly_stake_day_k9_park(self):
+        """
+        Half Kelly for day_k9_park at typical -110 DK odds.
+        p=0.564, b=(1/0.524)-1=0.908
+        full Kelly = (0.564*0.908 - 0.436)/0.908 = 0.084
+        half Kelly = 0.042 — well below 15% cap.
+        """
+        from mlb.betting import _FILTER_WIN_PROBS, american_to_price
+
+        p = _FILTER_WIN_PROBS["day_k9_park"]
+        price = american_to_price(-110)
+        b = (1 / price) - 1
+        full_k = max(0.0, (p * b - (1 - p)) / b)
+        half_k = min(full_k * 0.50, 0.15)
+        np.testing.assert_allclose(full_k, 0.084, atol=0.002)
+        np.testing.assert_allclose(half_k, full_k * 0.50, rtol=1e-6)
+        assert half_k < 0.15, "day_k9_park half Kelly should not hit 15% cap at -110"
+
+    def test_half_kelly_stake_summer_hot_wind_out(self):
+        """
+        Half Kelly for summer_hot_wind_out at -110.
+        p=0.631, full Kelly ~22.5%, half Kelly ~11.3% — still below 15% cap.
+        """
+        from mlb.betting import _FILTER_WIN_PROBS, american_to_price
+
+        p = _FILTER_WIN_PROBS["summer_hot_wind_out"]
+        price = american_to_price(-110)
+        b = (1 / price) - 1
+        full_k = max(0.0, (p * b - (1 - p)) / b)
+        half_k = min(full_k * 0.50, 0.15)
+        np.testing.assert_allclose(full_k, 0.225, atol=0.003)
+        assert half_k < 0.15, "summer_hot_wind_out half Kelly should not hit 15% cap at -110"
+        assert half_k > 0.10, "summer_hot_wind_out half Kelly should be substantially positive"
+
+    def test_summer_months_constant(self):
+        """SUMMER_MONTHS must be exactly July, August, September."""
+        from mlb.betting import SUMMER_MONTHS
+
+        assert SUMMER_MONTHS == frozenset({7, 8, 9})
+
+    def test_under_parks_nonempty(self):
+        from mlb.betting import UNDER_PARKS
+
+        assert len(UNDER_PARKS) >= 6, "Expected at least 6 pitcher-friendly parks"

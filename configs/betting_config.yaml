@@ -1,43 +1,82 @@
 # Betting Configuration
-# Loaded by mlb/betting.py and mlb/live.py
+# Loaded by mlb/betting.py
 
+# ── Kalshi API ────────────────────────────────────────────────────────────────
 kalshi:
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   key_id_env: "KALSHI_KEY_ID"              # set in .env
   private_key_path: "~/.kalshi/private_key.pem"
-  series_ticker: "KXMLB"                   # MLB totals series
-  dry_run: true                            # ALWAYS true until backtesting validates edge
+  series_ticker: "KXMLB"                   # full-game MLB totals
+  f5_series_ticker: "KXMLBF5TOTAL"         # first-five-innings totals
+  dry_run: true                            # set false only after live validation
 
+# ── Polymarket ────────────────────────────────────────────────────────────────
 polymarket:
   gamma_api_url: "https://gamma-api.polymarket.com"
-  # No auth required for read-only market data
+  # Read-only cross-market signal — no auth required
 
+# ── Bet Sizing (production configuration) ────────────────────────────────────
+# Strategy: Half Kelly (0.5x multiplier) with 15% bankroll cap.
+# Validated in backtest 2021-2025 vs DraftKings closing lines:
+#   $100 → $9,711  |  Sharpe 1.60  |  Max drawdown -67.6%
+#
+# Filter-level Kelly stake estimates at typical -110 DK odds:
+#   day_k9_park:         full Kelly ~8.4%  → half Kelly ~4.2%
+#   high_line:           full Kelly ~10.7% → half Kelly ~5.4%
+#   summer_hot_wind_out: full Kelly ~22.5% → half Kelly ~11.3% (below 15% cap)
 sizing:
-  kelly_multiplier: 0.25                  # fractional Kelly — never change to 1.0
-  max_bet_pct: 0.05                       # max 5% of bankroll per game
+  kelly_multiplier: 0.50                  # half Kelly — balances growth vs drawdown
+  max_bet_pct: 0.15                       # 15% bankroll cap (unlocks OVER bets fully)
   max_open_positions: 3                   # max simultaneous open bets
   initial_bankroll: 1000.0               # starting bankroll for simulation
 
-filters:
-  min_edge: 0.03                          # minimum edge vs Kalshi mid-price
-  min_open_interest: 1000.0              # minimum Kalshi open interest in dollars
-  min_volume_24h: 500.0                  # minimum 24h volume
-  skip_first_n_games: 20                 # skip first 20 games of season (small sample)
+# ── Structural Filters ────────────────────────────────────────────────────────
+# No model needed — filters game conditions before first pitch.
+# EDA win rates (2021-2025, DraftKings, n = total bets in sample):
+structural_filters:
+  under:
+    day_k9_park:
+      enabled: true
+      win_rate: 0.564                     # EDA: 56.4% under rate (n=906)
+      parks: [SFG, CLE, TEX, CIN, CHW, SDP, SEA, DET]
+      k9_combined_min: 14.0              # combined starter K/9 threshold
+      era_l3_max: 4.0                    # per-SP last-3-starts ERA guard (when available)
+      day_game_cutoff_hour: 18           # games starting before 18:00 ET
 
+    high_line:
+      enabled: true
+      win_rate: 0.575                     # EDA: 57.5% under rate (n=373)
+      line_min: 11.0                     # closing total >= 11 triggers filter
+
+  over:
+    summer_hot_wind_out:
+      enabled: true
+      win_rate: 0.631                     # EDA: 63.1% over rate (n=134, Jul-Sep)
+      temp_min_f: 80.0                   # minimum temperature
+      wind_speed_min_mph: 10.0           # wind must be at least this strong
+      wind_speed_max_mph: 15.0           # above 15mph effect reverses (disrupts command)
+      wind_direction: out                # wind blowing toward outfield
+      months: [7, 8, 9]                  # July, August, September only
+
+# ── Model-Based Filters (EV threshold) ───────────────────────────────────────
+filters:
+  min_edge: 0.03                          # minimum EV vs Kalshi mid-price
+  min_open_interest: 1000.0              # minimum Kalshi open interest in dollars
+
+# ── CLV Tracking ─────────────────────────────────────────────────────────────
 clv:
   track: true
-  benchmark: "kalshi_closing"            # primary CLV benchmark
-  secondary_benchmark: "sbr_pinnacle_closing"
+  benchmark: "kalshi_closing"
 
+# ── Backtest Settings ─────────────────────────────────────────────────────────
 backtest:
   start_date: "2021-04-01"
-  end_date: "2024-10-01"
-  odds_source: "sbr_pinnacle"            # use Pinnacle closing line as market proxy
-  sensitivity_thresholds: [0.02, 0.03, 0.05]
+  end_date: "2025-10-01"
+  book: "draftkings"                      # DraftKings as simulation benchmark
+  flat_bet_pct: 0.02                      # used for sensitivity comparisons only
 
+# ── Alerts (paper trading) ────────────────────────────────────────────────────
 alerts:
-  # Paper trading alert thresholds (dry_run=true)
-  ev_threshold: 0.03                     # alert when EV > this
-  price_move_threshold: 0.04             # alert when Kalshi price moves > 4 cents
-  # Set to false to disable console alerts
+  ev_threshold: 0.03
+  price_move_threshold: 0.04
   console: true

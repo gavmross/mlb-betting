@@ -57,3 +57,14 @@ Thumbs.db
 
 # ── Optuna study DB (regenerable) ────────────────────────────────────────────
 optuna_studies/
+
+# ── Local Claude Code settings (machine-specific permissions) ─────────────────
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# ── Local caches and credentials ──────────────────────────────────────────────
+.cache.sqlite
+.kalshi/
+
+# ── pip install artifacts (shell redirect leftovers) ──────────────────────────
+=*

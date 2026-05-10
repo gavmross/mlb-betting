@@ -343,8 +343,8 @@ Bet when EV > $0.03 (min edge threshold)
 ```
 b = (1 / price) − 1
 f* = (p × b − q) / b    where q = 1 − p
-Bet size = f* × 0.25    (fractional Kelly, always 0.25×)
-Hard cap: never bet more than 5% of bankroll
+Bet size = f* × 0.50    (half Kelly — production default)
+Hard cap: never bet more than 15% of bankroll
 ```
 
 **Closing Line Value (CLV):**
@@ -359,7 +359,7 @@ Sustained positive CLV over 200+ bets is the strongest evidence of real edge.
 - Minimum edge: $0.03 vs Kalshi mid-price
 - Minimum Kalshi open interest: $1,000
 - Maximum simultaneous positions: 3 games at once
-- Maximum single-game bet: 5% of bankroll
+- Maximum single-game bet: 15% of bankroll (unlocks full half-Kelly on OVER bets)
 
 ### American Odds Conversion
 
@@ -377,9 +377,12 @@ fair_over, fair_under = devig_prices(raw_over, raw_under)  # → (0.50, 0.50)
 ```bash
 python -m mlb.betting daily --date today        # price today, write to predictions
 python -m mlb.betting simulate \
-    --start 2021-04-01 --end 2024-10-01 \
-    --min-edge 0.03 --kelly-mult 0.25 \
-    --initial-bankroll 1000                     # historical simulation
+    --start 2021-04-01 --end 2025-10-01 \
+    --min-edge 0.03 --kelly-mult 0.50 \
+    --initial-bankroll 1000                     # model-based simulation
+python -m mlb.betting simulate-structural \
+    --filters day_k9_park high_line summer_hot_wind_out \
+    --sizing half_kelly --initial-bankroll 1000 # structural filter simulation
 python -m mlb.betting simulate --min-edge 0.02 --output sensitivity_002.csv
 python -m mlb.betting update-clv --date 2025-04-09
 ```
@@ -419,7 +422,7 @@ pytest tests/unit/test_features.py -v    # run after any feature change
 | `test_elo.py` | 18 | Zero-sum invariant, update formula, regression-to-mean |
 | `test_model.py` | 20 | CV structure, fold boundaries, overdispersion check |
 | `test_calibration.py` | 23 | Convolution sum-to-one, NegBinom vs Poisson, symmetry |
-| `test_betting.py` | 38 | EV formula, Kelly known values, CLV sign conventions, devig |
+| `test_betting.py` | 44 | EV formula, Kelly known values, CLV sign conventions, devig, structural filter constants |
 
 Every new rolling feature requires two new tests: a **leakage test** (verifies
 `shift(1)` is applied) and a **cold-start test** (verifies NaN for first game).
@@ -443,8 +446,8 @@ Controls all position sizing and filter parameters. Key settings:
 
 ```yaml
 sizing:
-  kelly_multiplier: 0.25    # NEVER change to 1.0
-  max_bet_pct: 0.05         # 5% bankroll cap
+  kelly_multiplier: 0.50    # half Kelly — production default
+  max_bet_pct: 0.15         # 15% bankroll cap (allows full half-Kelly on OVER bets)
   max_open_positions: 3
 
 filters:
@@ -469,9 +472,7 @@ populated database.
 | `02_feature_eda.ipynb` | Feature correlation with actual scoring | Park factor r=0.71, market ceiling r=0.22; overdispersion confirmed (2.1–2.4) |
 | `03_kalshi_market_analysis.ipynb` | Market structure, vig analysis, line movement | Vig ~5.6%, under bias ~2%, Kalshi preferred over SBR books |
 | `04_model_comparison.ipynb` | GLM vs HGBR vs NegBinom, calibration curves | Three-model comparison table, final model selection |
-
-Notebook 05 (`05_betting_simulation.ipynb`) is the next step — walk-forward
-betting simulation with sensitivity analysis and go/no-go decision.
+| `05_betting_simulation.ipynb` | Walk-forward betting simulation, structural filters | ROI/Sharpe/drawdown by strategy; go/no-go decision |
 
 ---
 
@@ -488,9 +489,10 @@ betting simulation with sensitivity analysis and go/no-go decision.
 - Walk-forward `TimeSeriesSplit` only — never `KFold` or `shuffle=True`
 
 **Betting:**
-- Always 0.25× fractional Kelly — never full Kelly
-- Hard cap: 5% of bankroll per game
+- Production sizing: 0.50× fractional Kelly (half Kelly) — never full Kelly
+- Hard cap: 15% of bankroll per game (unlocks correct half-Kelly on high-edge OVER bets)
 - Only bet when EV > $0.03 vs Kalshi mid-price
+- Structural filters run without a model: `simulate_structural()` → day_k9_park, high_line, summer_hot_wind_out
 - `dry_run: true` in `betting_config.yaml` until backtest confirms positive ROI
 
 **Code style:**

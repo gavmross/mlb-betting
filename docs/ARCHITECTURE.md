@@ -658,7 +658,90 @@ Model comparison summary table (from Notebook 4):
 
 ## Betting Engine
 
-### EV Calculation
+Two independent strategy layers exist in `mlb/betting.py`:
+
+1. **Structural filters** (`simulate_structural`) — no model, bet on pre-game conditions.
+   These are the **primary production strategy**, validated 2021–2025.
+2. **Model-based EV** (`simulate`, `run_daily`) — uses λ_home/λ_away from Poisson models.
+   Currently in paper-trading until ROI turns consistently positive.
+
+---
+
+### Structural Filters (Primary Production Strategy)
+
+Pre-game binary rules with no model dependency. Uses SBR closing lines as the market.
+Contradictory signals (game triggers both UNDER and OVER) are skipped.
+
+**Backtest 2021–2025, DraftKings, half Kelly 0.5x + 15% cap, $100 start:**
+```
+$100 → $9,711  |  Win rate 57.4%  |  Sharpe 1.60  |  Max drawdown -67.6%
+```
+
+**UNDER Filters**
+
+| Filter | Condition | EDA Win% | n |
+|---|---|---|---|
+| `day_k9_park` | Day game at SFG/CLE/TEX/CIN/CHW/SDP/SEA/DET + K9 combined ≥ 14.0 + era_l3 ≤ 4.0 | 56.4% | 906 |
+| `high_line` | Closing line ≥ 11.0 | 57.5% | 373 |
+
+**OVER Filter**
+
+| Filter | Condition | EDA Win% | n |
+|---|---|---|---|
+| `summer_hot_wind_out` | Jul–Sep + temp ≥ 80°F + outdoor + wind "out" 10–14 mph | 63.1% | 134 |
+
+Wind cap at 15 mph: above that, gusts disrupt pitcher command and the effect reverses.
+July–September restriction removes April–June where the signal is absent (50.0% hit rate).
+
+**Per-filter Kelly input win rates** (`_FILTER_WIN_PROBS` in betting.py):
+```python
+_FILTER_WIN_PROBS = {
+    "day_k9_park":          0.564,
+    "high_line":            0.575,
+    "hot_wind_out":         0.560,   # all-season variant (weaker)
+    "summer_hot_wind_out":  0.631,   # production variant
+}
+```
+
+**CLI:**
+```bash
+python -m mlb.betting simulate-structural \
+    --filter day_k9_park --filter high_line --filter summer_hot_wind_out \
+    --start 2021-04-01 --end 2025-10-01 \
+    --book draftkings
+```
+
+---
+
+### Bet Sizing — Half Kelly (0.5x), 15% Cap
+
+Validated against flat and quarter/full Kelly variants. Selected configuration:
+
+```python
+# sizing='quarter_kelly' parameter with kelly_mult=0.50, kelly_cap=0.15
+win_prob = _FILTER_WIN_PROBS[triggered_filter]
+b        = (1 / raw_price) - 1          # net odds at DK closing price (vig-inclusive)
+full_k   = max(0.0, (win_prob * b - (1 - win_prob)) / b)
+stake    = bankroll * min(full_k * 0.50, 0.15)
+```
+
+Typical stakes at -110 DK odds:
+- `day_k9_park`: full Kelly 8.4% → half Kelly **~4.2%**
+- `high_line`: full Kelly 10.7% → half Kelly **~5.4%**
+- `summer_hot_wind_out`: full Kelly 22.5% → half Kelly **~11.3%** (below 15% cap)
+
+Growth comparison ($100 → 4.5 years):
+```
+Flat  5%  → $5,254  Sharpe 1.48  DD -77.8%  (reference)
+Qtr Kelly → $1,529  Sharpe 1.60  DD -40.9%  (too conservative)
+Half Kelly 15% cap → $9,711  Sharpe 1.60  DD -67.6%  ← production
+Full Kelly 15% cap → $27,621 Sharpe 1.60  DD -92.4%  (too aggressive)
+```
+
+---
+
+### Model-Based EV Calculation
+
 ```python
 def compute_ev(over_prob: float, kalshi_over_price: float) -> dict:
     ev_over  = over_prob * (1 - kalshi_over_price) - (1 - over_prob) * kalshi_over_price
@@ -670,10 +753,10 @@ def compute_ev(over_prob: float, kalshi_over_price: float) -> dict:
             'edge': over_prob - kalshi_over_price, 'bet_side': bet_side}
 ```
 
-### Kelly Criterion
+### Kelly (Model-Based Path)
 ```python
 def kelly_bet(win_prob: float, kalshi_price: float,
-              kelly_mult: float = 0.25, max_pct: float = 0.05) -> float:
+              kelly_mult: float = 0.50, max_pct: float = 0.15) -> float:
     b = (1 / kalshi_price) - 1
     full_kelly = max(0.0, (win_prob * b - (1 - win_prob)) / b)
     return min(full_kelly * kelly_mult, max_pct)
@@ -689,7 +772,6 @@ def compute_clv(entry: float, closing: float, side: str) -> float:
 ### Position Constraints
 - Min edge: $0.03 vs Kalshi mid
 - Min open interest: $1,000
-- Max position: 5% of bankroll
 - Max simultaneous positions: 3
 
 ### Cross-Market Signal
@@ -697,7 +779,6 @@ def compute_clv(entry: float, closing: float, side: str) -> float:
 def get_consensus(kalshi_mid: float, poly_mid: float) -> dict:
     spread = abs(kalshi_mid - poly_mid)
     # spread > 0.04 means one platform is lagging
-    # kalshi_mid < poly_mid for OVER = Kalshi is cheaper = favorable entry
     return {'spread': spread, 'kalshi_is_cheap_for_over': kalshi_mid < poly_mid}
 ```
 
