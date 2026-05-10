@@ -1099,11 +1099,13 @@ FEATURE_COLS: list[str] = [
     # E: Weather
     "temp_f", "wind_speed_mph",
     "wind_dir_out", "wind_dir_in", "wind_dir_cross_right", "wind_dir_cross_left",
-    "precip_prob", "humidity", "is_night_game",
+    # precip_prob excluded — always NULL from archive API
+    "humidity", "is_night_game",
     # F: Market
     "total_line_open", "total_line_close", "line_movement",
-    # F2: Kalshi cross-market (F5 vs full-game divergence signal)
-    "kalshi_fullgame_line", "kalshi_f5_line", "f5_ratio",
+    # F2: Kalshi cross-market features excluded from training — 100% NULL in 2021-2024
+    # (Kalshi MLB data starts 2026-03-31). Columns still computed in build_features()
+    # and will populate for 2026+ live predictions; keep out of model to avoid noise.
     # G: Team strength
     "home_win_pct_10d", "away_win_pct_10d",
     "home_run_diff_pg_season", "away_run_diff_pg_season",

@@ -486,6 +486,7 @@ def simulate(
     model_name: str = "glm_poisson",
     book: str = "draftkings",
     use_negbinom: bool = True,
+    sp_era_max: float | None = None,
     output_path: str | None = None,
     db_path: str = "data/mlb.db",
 ) -> dict[str, Any]:
@@ -514,6 +515,11 @@ def simulate(
         Sportsbook to use for odds (default 'pinnacle' — sharpest line).
     use_negbinom : bool
         Use NegBinom convolution when dispersion_alpha available.
+    sp_era_max : float or None
+        If set, skip games where the average starting-pitcher ERA (home + away)
+        exceeds this threshold.  E.g. 3.75 restricts bets to quality pitching
+        matchups where the model has demonstrated higher accuracy.
+        None = no filter (default).
     output_path : str or None
         If set, write per-bet detail to this CSV path.
     db_path : str
@@ -536,13 +542,23 @@ def simulate(
                    g.date, g.home_team, g.away_team,
                    g.home_score, g.away_score,
                    o.total_close,
-                   o.over_odds_close, o.under_odds_close
+                   o.over_odds_close, o.under_odds_close,
+                   ph.era_season AS home_sp_era,
+                   pa.era_season AS away_sp_era
             FROM predictions p
             JOIN games g ON p.game_id = g.game_id
             JOIN sportsbook_odds o
                 ON o.date        = g.date
                AND o.home_team   = g.home_team
                AND o.book        = ?
+            LEFT JOIN pitchers ph
+                ON ph.game_id = p.game_id
+               AND ph.team = g.home_team
+               AND ph.is_starter = 1
+            LEFT JOIN pitchers pa
+                ON pa.game_id = p.game_id
+               AND pa.team = g.away_team
+               AND pa.is_starter = 1
             WHERE g.date BETWEEN ? AND ?
               AND p.model_name   LIKE ?
               AND (
@@ -587,6 +603,17 @@ def simulate(
         over_odds = int(row["over_odds_close"])
         under_odds = int(row["under_odds_close"])
         actual_total = int(row["home_score"]) + int(row["away_score"])
+
+        # SP ERA filter — skip weak-pitching matchups where model accuracy is poor
+        if sp_era_max is not None:
+            home_era = row["home_sp_era"]
+            away_era = row["away_sp_era"]
+            if (
+                home_era is not None
+                and away_era is not None
+                and (float(home_era) + float(away_era)) / 2.0 > sp_era_max
+            ):
+                continue
 
         # Raw implied prices from closing odds (include the vig)
         raw_over = american_to_price(over_odds)
@@ -650,6 +677,14 @@ def simulate(
         # True CLV requires recording entry price before close — use 0 as placeholder
         clv = 0.0  # populated when closing Kalshi data available
 
+        h_era = row["home_sp_era"]
+        a_era = row["away_sp_era"]
+        sp_era_avg = (
+            round((float(h_era) + float(a_era)) / 2.0, 2)
+            if h_era is not None and a_era is not None
+            else None
+        )
+
         bet_log.append(
             {
                 "date": game_date,
@@ -663,6 +698,7 @@ def simulate(
                 "vig_pct": vig_pct,
                 "edge": round(ev_result["edge"], 4),
                 "bet_side": bet_side,
+                "sp_era_avg": sp_era_avg,
                 "stake": round(stake, 2),
                 "kelly_fraction": round(kelly, 4),
                 "outcome": outcome,
@@ -1090,6 +1126,8 @@ def _print_simulation_report(summary: dict[str, Any], params: dict[str, Any]) ->
     print(f"  Min edge:          ${params['min_edge']:.2f}")
     print(f"  Kelly multiplier:  {params['kelly_mult']:.2f}x")
     print(f"  Initial bankroll:  ${params['initial_bankroll']:,.0f}")
+    if "sp_era_max" in params:
+        print(f"  SP ERA filter:     avg ERA <= {params['sp_era_max']:.2f}")
     print("=" * 60)
     print()
     print(f"  Games evaluated:   {summary['games_evaluated']:,}")
@@ -1155,6 +1193,11 @@ if __name__ == "__main__":
     sim_p.add_argument("--initial-bankroll", type=float, default=1000.0)
     sim_p.add_argument("--model", default="gbr")
     sim_p.add_argument("--book", default="pinnacle")
+    sim_p.add_argument(
+        "--sp-era-max", type=float, default=None,
+        help="Only bet games where avg SP ERA (home+away)/2 <= this value. "
+             "Recommended: 3.75. None = no filter.",
+    )
     sim_p.add_argument("--output", default=None, help="CSV path for per-bet detail")
     sim_p.add_argument("--db", default="data/mlb.db")
 
@@ -1187,6 +1230,7 @@ if __name__ == "__main__":
     parser.add_argument("--initial-bankroll", type=float, default=1000.0)
     parser.add_argument("--model", default="gbr")
     parser.add_argument("--book", default="pinnacle")
+    parser.add_argument("--sp-era-max", type=float, default=None, dest="sp_era_max")
     parser.add_argument("--output", default=None)
     parser.add_argument("--db", default="data/mlb.db")
 
@@ -1233,6 +1277,7 @@ if __name__ == "__main__":
             print()
 
     elif args.command == "simulate" or getattr(args, "simulate", False):
+        sp_era_max = getattr(args, "sp_era_max", None)
         summary = simulate(
             start=getattr(args, "start", "2021-04-01"),
             end=getattr(args, "end", "2024-10-01"),
@@ -1241,21 +1286,22 @@ if __name__ == "__main__":
             initial_bankroll=getattr(args, "initial_bankroll", 1000.0),
             model_name=args.model,
             book=getattr(args, "book", "pinnacle"),
+            sp_era_max=sp_era_max,
             output_path=args.output,
             db_path=args.db,
         )
         if summary:
-            _print_simulation_report(
-                summary,
-                {
-                    "start": getattr(args, "start", "2021-04-01"),
-                    "end": getattr(args, "end", "2024-10-01"),
-                    "min_edge": getattr(args, "min_edge", MIN_EDGE),
-                    "kelly_mult": getattr(args, "kelly_mult", KELLY_MULT),
-                    "initial_bankroll": getattr(args, "initial_bankroll", 1000.0),
-                    "book": getattr(args, "book", "pinnacle"),
-                },
-            )
+            params = {
+                "start": getattr(args, "start", "2021-04-01"),
+                "end": getattr(args, "end", "2024-10-01"),
+                "min_edge": getattr(args, "min_edge", MIN_EDGE),
+                "kelly_mult": getattr(args, "kelly_mult", KELLY_MULT),
+                "initial_bankroll": getattr(args, "initial_bankroll", 1000.0),
+                "book": getattr(args, "book", "pinnacle"),
+            }
+            if sp_era_max is not None:
+                params["sp_era_max"] = sp_era_max
+            _print_simulation_report(summary, params)
 
     elif args.command == "update-clv":
         n = update_clv(date=args.date, db_path=args.db)
