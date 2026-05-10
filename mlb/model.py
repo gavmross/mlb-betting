@@ -324,6 +324,8 @@ def walk_forward_cv(
     model_type: str = "gbr",
     feature_cols: list[str] | None = None,
     target: str = "fullgame",
+    db_path: str = "data/mlb.db",
+    write_oof: bool = False,
 ) -> dict[str, Any]:
     """
     Walk-forward cross-validation for both home_runs and away_runs models.
@@ -354,6 +356,7 @@ def walk_forward_cv(
 
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     fold_results = []
+    oof_records: list[dict] = []  # accumulate OOF predictions across all folds
 
     for fold_idx, (train_idx, test_idx) in enumerate(tscv.split(X_all)):
         X_train = X_all.iloc[train_idx]
@@ -401,6 +404,21 @@ def walk_forward_cv(
         lam_home = np.clip(lam_home, 0.01, 30.0)
         lam_away = np.clip(lam_away, 0.01, 30.0)
 
+        # Collect OOF predictions (game_id, lambda pair) for DB writing after all folds
+        if write_oof and "game_id" in df_sorted.columns:
+            x_labels = X_all.index[test_idx]
+            for pos, lbl in enumerate(x_labels):
+                gid = df_sorted.loc[lbl, "game_id"]
+                if gid is not None:
+                    oof_records.append(
+                        {
+                            "game_id": gid,
+                            "lambda_home": float(lam_home[pos]),
+                            "lambda_away": float(lam_away[pos]),
+                            "predicted_total_runs": float(lam_home[pos] + lam_away[pos]),
+                        }
+                    )
+
         # Metrics
         dev_home = mean_poisson_deviance(y_home_test, lam_home)
         dev_away = mean_poisson_deviance(y_away_test, lam_away)
@@ -445,6 +463,13 @@ def walk_forward_cv(
             disp_home,
             disp_away,
         )
+
+    # Write OOF predictions to DB so simulate() can use them for backtesting
+    if write_oof and oof_records:
+        stored_name = f"f5_{model_type}" if target == "f5" else model_type
+        oof_df = pd.DataFrame(oof_records)
+        n_written = write_predictions(oof_df, model_type=stored_name, db_path=db_path)
+        logger.info("Wrote %d OOF lambda predictions (%s) to predictions table", n_written, stored_name)
 
     # Aggregate
     devs_home = [r["dev_home"] for r in fold_results]
@@ -1340,7 +1365,11 @@ if __name__ == "__main__":
         else:
             df = build_features(start_date=args.start, end_date=args.end)
             results = walk_forward_cv(
-                df, n_splits=args.n_splits, model_type=args.model, target=args.target
+                df,
+                n_splits=args.n_splits,
+                model_type=args.model,
+                target=args.target,
+                write_oof=True,
             )
             print(f"\n=== Walk-Forward CV Results (target={args.target}) ===")
             for fold in results["fold_results"]:

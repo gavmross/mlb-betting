@@ -1101,8 +1101,10 @@ FEATURE_COLS: list[str] = [
     "wind_dir_out", "wind_dir_in", "wind_dir_cross_right", "wind_dir_cross_left",
     # precip_prob excluded — always NULL from archive API
     "humidity", "is_night_game",
-    # F: Market
-    "total_line_open", "total_line_close", "line_movement",
+    # F: Market features excluded — closing line is the target benchmark, not a feature.
+    # Using total_line_close as a predictor of (total_runs > total_line_close) is circular:
+    # the model would learn market consensus, not independent signal. Columns are still
+    # computed in build_features() and available for EV calculation at inference time.
     # F2: Kalshi cross-market features excluded from training — 100% NULL in 2021-2024
     # (Kalshi MLB data starts 2026-03-31). Columns still computed in build_features()
     # and will populate for 2026+ live predictions; keep out of model to avoid noise.
