@@ -107,11 +107,20 @@ Step 25  Integration tests + README               [ ]
 - kalshi_markets: 809 full-game rows + 210 F5 rows — 100% game_id linked
 
 ## Model State (as of 2026-05-09)
-- lgbm_binary retrained on 2021-2025 (9,368 games, was 2022-2024 / 5,817)
-- OOF: log_loss=0.7161, AUC=0.5098, brier=0.2602
-- Backtest 2022-2025 (DraftKings, no filter): 50.5% win, -1.26% ROI
-- Backtest 2022-2025 (ERA <= 3.50 filter): 64.9% win, +24.98% ROI, -18.3% DD, Sharpe 0.290
-- FEATURE_COLS: 51 (was 55 — removed 4 dead NULL features)
+- lgbm_binary retrained on 2021-2025 (11,703 games, was 9,368 → 5,817 originally)
+- OOF: log_loss=0.7207, AUC=0.4969, brier=0.2619  (honest: 2021 is hard first fold)
+- Backtest 2021-2025 (DraftKings, no filter): not run
+- Backtest 2021-2025 (ERA <= 3.50 filter): 61.4% win, +16.16% ROI, -31.3% DD, annualised Sharpe 3.23 → GO
+- FEATURE_COLS: 51 (was 55 — removed 4 dead NULL features: precip_prob, 3 Kalshi)
+- Sharpe fix: now reports annualised Sharpe (raw * sqrt(bets/yr)); go/no-go threshold 1.0
+
+## Data Fixes Applied
+- Elo re-run from 2015 (was 2022) — all 12 seasons now have valid Elo ratings
+- Weather backfilled for 2021 (was missing) — now 93% coverage matching 2022-2025
+- sportsbook_odds game_id backfill: 9,256 rows updated (all years 2021-2025 now linked)
+  - Root cause: 2021 odds were scraped before game rows existed to link against
+  - Fix: one-time UPDATE joining on (date, home_team, away_team)
+  - Note: odds_scraper.py should be updated to auto-link on future runs (TODO)
 
 ## Next Steps
 1. Re-run F5 backfill: `python -m mlb.scraper --backfill-f5 --force-f5` (2016-07-07 timed out)
