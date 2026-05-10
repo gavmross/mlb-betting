@@ -108,11 +108,12 @@ Step 25  Integration tests + README               [ ]
 
 ## Model State (as of 2026-05-09)
 - lgbm_binary retrained on 2021-2025 (11,703 games, was 9,368 → 5,817 originally)
-- OOF: log_loss=0.7207, AUC=0.4969, brier=0.2619  (honest: 2021 is hard first fold)
-- Backtest 2021-2025 (DraftKings, no filter): not run
-- Backtest 2021-2025 (ERA <= 3.50 filter): 61.4% win, +16.16% ROI, -31.3% DD, annualised Sharpe 3.23 → GO
-- FEATURE_COLS: 51 (was 55 — removed 4 dead NULL features: precip_prob, 3 Kalshi)
-- Sharpe fix: now reports annualised Sharpe (raw * sqrt(bets/yr)); go/no-go threshold 1.0
+- OOF: log_loss=0.7207, AUC=0.4969, brier=0.2619
+- Backtest 2021-2025, DraftKings, NO filter: -2.84% ROI, 49.9% win → NO-GO (honest)
+- Backtest 2021-2025, ERA<=3.50 filter (CLEAN, pre-game ERA): -6.45% ROI, 49.0% win → NO-GO
+- Previous +16.16% ROI result was entirely from post-game ERA leakage — now fixed
+- FEATURE_COLS: 51 (removed 4 dead NULL features: precip_prob, 3 Kalshi)
+- Sharpe: annualised (raw * sqrt(bets/yr)); go/no-go threshold 1.0
 
 ## Data Fixes Applied
 - Elo re-run from 2015 (was 2022) — all 12 seasons now have valid Elo ratings
