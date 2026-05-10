@@ -531,6 +531,28 @@ def simulate(
         max_drawdown, avg_clv, bankroll_final.
     """
     with get_conn(db_path) as conn:
+        # Precompute pre-game ERA per pitcher via shift(1) — avoids post-game leakage.
+        # era_season in the pitchers table is recorded post-outing; shift(1) gives
+        # the ERA entering the game, which is the only value available before first pitch.
+        if sp_era_max is not None:
+            pitcher_df = pd.read_sql_query(
+                """
+                SELECT ph.game_id, ph.team, ph.pitcher_id, ph.era_season
+                FROM pitchers ph
+                JOIN games g ON g.game_id = ph.game_id
+                WHERE ph.is_starter = 1 AND ph.era_season IS NOT NULL
+                ORDER BY ph.pitcher_id, g.date
+                """,
+                conn,
+            )
+            pitcher_df["era_pregame"] = pitcher_df.groupby("pitcher_id")[
+                "era_season"
+            ].shift(1)
+            # Index: (game_id, team) → pre-game ERA float or NaN
+            _era_idx = pitcher_df.set_index(["game_id", "team"])["era_pregame"]
+        else:
+            _era_idx = None
+
         # Join predictions → games → sportsbook_odds for the simulation window
         rows = conn.execute(
             """
@@ -542,23 +564,13 @@ def simulate(
                    g.date, g.home_team, g.away_team,
                    g.home_score, g.away_score,
                    o.total_close,
-                   o.over_odds_close, o.under_odds_close,
-                   ph.era_season AS home_sp_era,
-                   pa.era_season AS away_sp_era
+                   o.over_odds_close, o.under_odds_close
             FROM predictions p
             JOIN games g ON p.game_id = g.game_id
             JOIN sportsbook_odds o
                 ON o.date        = g.date
                AND o.home_team   = g.home_team
                AND o.book        = ?
-            LEFT JOIN pitchers ph
-                ON ph.game_id = p.game_id
-               AND ph.team = g.home_team
-               AND ph.is_starter = 1
-            LEFT JOIN pitchers pa
-                ON pa.game_id = p.game_id
-               AND pa.team = g.away_team
-               AND pa.is_starter = 1
             WHERE g.date BETWEEN ? AND ?
               AND p.model_name   LIKE ?
               AND (
@@ -604,13 +616,19 @@ def simulate(
         under_odds = int(row["under_odds_close"])
         actual_total = int(row["home_score"]) + int(row["away_score"])
 
-        # SP ERA filter — skip weak-pitching matchups where model accuracy is poor
-        if sp_era_max is not None:
-            home_era = row["home_sp_era"]
-            away_era = row["away_sp_era"]
+        # SP ERA filter — uses pre-game ERA (shift(1) applied above) so the filter
+        # only sees ERA the starter carried INTO this game, not their result in it.
+        if _era_idx is not None:
+            game_id = row["game_id"]
+            home_team = row["home_team"]
+            away_team = row["away_team"]
+            home_era = _era_idx.get((game_id, home_team))
+            away_era = _era_idx.get((game_id, away_team))
             if (
                 home_era is not None
+                and not (isinstance(home_era, float) and np.isnan(home_era))
                 and away_era is not None
+                and not (isinstance(away_era, float) and np.isnan(away_era))
                 and (float(home_era) + float(away_era)) / 2.0 > sp_era_max
             ):
                 continue
@@ -677,11 +695,14 @@ def simulate(
         # True CLV requires recording entry price before close — use 0 as placeholder
         clv = 0.0  # populated when closing Kalshi data available
 
-        h_era = row["home_sp_era"]
-        a_era = row["away_sp_era"]
+        h_era = home_era if _era_idx is not None else None
+        a_era = away_era if _era_idx is not None else None
         sp_era_avg = (
             round((float(h_era) + float(a_era)) / 2.0, 2)
-            if h_era is not None and a_era is not None
+            if h_era is not None
+            and not (isinstance(h_era, float) and np.isnan(h_era))
+            and a_era is not None
+            and not (isinstance(a_era, float) and np.isnan(a_era))
             else None
         )
 
