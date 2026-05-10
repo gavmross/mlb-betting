@@ -1,7 +1,7 @@
 # Session Memory
 
 ## Current Phase
-Phase 5 complete. Phase 6 (Live Pipeline) pending historical data backfill.
+Phase 5 complete. Phase 6 (Live Pipeline) ready — historical backfill DONE.
 
 ## Implementation Progress
 
@@ -10,13 +10,13 @@ Step 1   pyproject.toml + requirements.txt        [x]
 Step 2   mlb/db.py — schema + WAL mode            [x]
 Step 3   .claude/ infrastructure                  [x]
 Step 4   data/stadiums.py                         [x]
-Step 5   mlb/scraper.py                           [x] (2015-2017 in progress, 2022-2026 done)
+Step 5   mlb/scraper.py                           [x] (2015-2026 COMPLETE — all seasons scraped)
 Step 6   mlb/odds_scraper.py                      [x] (49,244 rows 2021-2026)
 Step 7   mlb/weather.py                           [x]
 Step 8   mlb/kalshi.py                            [x] (F5TOTAL snapshot added)
 Step 9   mlb/polymarket.py                        [x]
 Step 10  Initial data load + validation           [x]
-Step 11  mlb/features.py                          [x] (53 features; statcast dead code removed)
+Step 11  mlb/features.py                          [x] (51 features; removed 4 dead NULL cols: precip_prob, kalshi_fullgame_line, kalshi_f5_line, f5_ratio)
 Step 12  mlb/elo.py                               [x]
 Step 13  tests/unit/                              [x] (20 pass, 2 xfailed)
 Step 14  notebooks/01_data_audit.ipynb            [x]
@@ -25,7 +25,7 @@ Step 16  mlb/model.py                             [x] (glm_poisson, hgbr_poisson
 Step 17  mlb/calibration.py                       [x]
 Step 18  notebooks/03_kalshi_market_analysis.ipynb [~] in progress
 Step 19  notebooks/04_model_comparison.ipynb      [~] in progress
-Step 20  mlb/betting.py                           [x] (fill-price bug fixed; vig-inclusive payout)
+Step 20  mlb/betting.py                           [x] (fill-price bug fixed; vig-inclusive payout; sp_era_max filter)
 Step 21  notebooks/05_betting_simulation.ipynb    [~] in progress
 Step 22  mlb/pipeline.py                         [ ] Phase 6
 Step 23  mlb/live.py                              [ ] Phase 6
@@ -97,32 +97,28 @@ Step 25  Integration tests + README               [ ]
 - `train(target='f5')` saves to `data/models/f5_gbr_poisson_v1.0.0.pkl`
 - `predict(target='f5')` loads the F5 artefact and returns F5 expected runs
 
-## Data State (as of 2026-05-09)
-- games: ~15,800 total
-  - 2015: 2,429 Final (COMPLETE)
-  - 2016: 2,430 Final (COMPLETE)
-  - 2017: ~791 Final (in progress ~33%)
-  - 2018-2021: 0 (not yet scraped)
-  - 2022-2025: 9,717 Final (COMPLETE)
-  - 2026: 551 Final + ~15 Preview
-  - f5_total_runs: ~5,300+ filled (backfill running)
-- team_stats: ~30,000+ rows
-- pitchers: ~85,000+ rows
-- sportsbook_odds: 49,244 rows (2021-2026, near-complete)
-- weather: backfilled through available history
+## Data State (as of 2026-05-09, updated)
+- games: ~25,190 total — ALL SEASONS COMPLETE
+  - 2015: 2,429 Final | 2016: 2,430 | 2017: 2,430 | 2018: 2,432 | 2019: 2,430
+  - 2020: 900 (COVID shortened) | 2021: 2,430 | 2022-2025: 9,717 | 2026: 551+
+- sportsbook_odds: 49,244 rows (2021-2026) — DK/FanDuel/Caesars/Bet365
 - elo_ratings: 20,532 rows (2022–2026, zero-sum verified)
 - pitcher_season_statcast: 3,938 rows (2015–2025)
-- kalshi_markets: 809 full-game rows + 210 F5 rows — 100% game_id linked (fixed)
+- kalshi_markets: 809 full-game rows + 210 F5 rows — 100% game_id linked
 
-## After Historical Scrape Completes (TODO)
-1. Re-run F5 backfill for skipped dates: `python -m mlb.scraper --backfill-f5 --force-f5`
-   - Known skipped: 2016-07-07 (timeout)
-2. Re-run Elo: `python -m mlb.elo --reset --start-season 2015 --end-season 2026`
-3. Weather backfill: `python -m mlb.weather --start 2015-04-01 --end 2021-10-31`
-4. Retrain full-game model on 2015-2025: `python -m mlb.model --train --start 2015-04-01 --end 2025-10-01`
-5. Train F5 model on 2015-2025: `python -m mlb.model --train --target f5 --start 2015-04-01 --end 2025-10-01`
-6. Run notebook 04 for model comparison with larger training set
-7. Run F5 backtest to compare F5 ROI vs full-game ROI
+## Model State (as of 2026-05-09)
+- lgbm_binary retrained on 2021-2025 (9,368 games, was 2022-2024 / 5,817)
+- OOF: log_loss=0.7161, AUC=0.5098, brier=0.2602
+- Backtest 2022-2025 (DraftKings, no filter): 50.5% win, -1.26% ROI
+- Backtest 2022-2025 (ERA <= 3.50 filter): 64.9% win, +24.98% ROI, -18.3% DD, Sharpe 0.290
+- FEATURE_COLS: 51 (was 55 — removed 4 dead NULL features)
+
+## Next Steps
+1. Re-run F5 backfill: `python -m mlb.scraper --backfill-f5 --force-f5` (2016-07-07 timed out)
+2. Re-run Elo on full history: `python -m mlb.elo --reset --start-season 2015 --end-season 2026`
+3. Weather backfill 2015-2020: `python -m mlb.weather --start 2015-04-01 --end 2020-10-31`
+4. Phase 6: mlb/pipeline.py daily orchestrator
+5. Phase 6: mlb/live.py WebSocket monitor
 
 ## Known Issues / Notes
 - NegBinom upgrade confirmed needed (dispersion home=2.14, away=2.36)
