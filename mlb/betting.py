@@ -293,12 +293,13 @@ def run_daily(
     db_path: str = "data/mlb.db",
     model_name: str = "gbr",
     use_negbinom: bool = True,
+    target: str = "fullgame",
 ) -> pd.DataFrame:
     """
     Price today's games and write bet recommendations to the predictions table.
 
     Reads lambda_home, lambda_away from the predictions table (written by
-    mlb/model.py --predict), fetches live Kalshi and Polymarket mid-prices,
+    mlb/model.py --predict), fetches live Kalshi mid-prices (joined by game_id),
     recomputes over_prob with the current line, and writes back:
     edge, ev, kelly_fraction, recommended_bet, bet_side.
 
@@ -311,6 +312,9 @@ def run_daily(
         Model variant to price (matches model_name in predictions table).
     use_negbinom : bool
         If True, use NegBinom convolution when dispersion_alpha is available.
+    target : str
+        ``'fullgame'`` reads ``total_over`` Kalshi markets (KXMLBTOTAL).
+        ``'f5'`` reads ``f5_total_over`` Kalshi markets (KXMLBF5TOTAL).
 
     Returns
     -------
@@ -320,28 +324,33 @@ def run_daily(
     if date is None:
         date = date_type.today().isoformat()
 
+    kalshi_market_type = "f5_total_over" if target == "f5" else "total_over"
+
     with get_conn(db_path) as conn:
         rows = conn.execute(
             """
             SELECT p.id, p.game_id, p.model_name, p.model_version,
                    p.lambda_home, p.lambda_away, p.dispersion_alpha,
-                   p.kalshi_ticker, p.kalshi_mid_price, p.polymarket_mid_price,
+                   p.polymarket_mid_price,
+                   k.ticker AS kalshi_ticker, k.mid_price AS kalshi_mid_price,
                    k.line, k.open_interest,
                    g.home_team, g.away_team, g.game_time_et
             FROM predictions p
             JOIN games g ON p.game_id = g.game_id
             LEFT JOIN kalshi_markets k
-                ON k.ticker = p.kalshi_ticker
+                ON k.game_id = p.game_id
+                AND k.market_type = ?
                 AND k.snapshot_ts = (
                     SELECT MAX(snapshot_ts)
                     FROM kalshi_markets
-                    WHERE ticker = p.kalshi_ticker
+                    WHERE game_id = p.game_id
+                      AND market_type = ?
                 )
             WHERE g.date = ?
               AND p.model_name LIKE ?
             ORDER BY g.game_time_et
             """,
-            (date, f"{model_name}%"),
+            (kalshi_market_type, kalshi_market_type, date, f"{model_name}%"),
         ).fetchall()
 
     if not rows:
@@ -357,6 +366,7 @@ def run_daily(
         alpha = row["dispersion_alpha"]
         line = row["line"]
         kalshi_price = row["kalshi_mid_price"]
+        kalshi_ticker = row["kalshi_ticker"]
         poly_price = row["polymarket_mid_price"]
         oi = row["open_interest"]
 
@@ -409,6 +419,7 @@ def run_daily(
             "lambda_home": lam_h,
             "lambda_away": lam_a,
             "over_prob": round(over_prob, 4),
+            "kalshi_ticker": kalshi_ticker,
             "kalshi_mid_price": kalshi_price,
             "polymarket_mid_price": poly_price,
             "edge": ev_result["edge"],
@@ -431,6 +442,8 @@ def run_daily(
                     UPDATE predictions
                     SET line             = ?,
                         over_prob        = ?,
+                        kalshi_ticker    = ?,
+                        kalshi_mid_price = ?,
                         edge             = ?,
                         ev               = ?,
                         kelly_fraction   = ?,
@@ -441,6 +454,8 @@ def run_daily(
                     (
                         r["line"],
                         r["over_prob"],
+                        r.get("kalshi_ticker"),
+                        r.get("kalshi_mid_price"),
                         r["edge"],
                         r["ev"],
                         r["kelly_fraction"],
@@ -468,8 +483,8 @@ def simulate(
     min_edge: float = MIN_EDGE,
     kelly_mult: float = KELLY_MULT,
     initial_bankroll: float = 1000.0,
-    model_name: str = "gbr",
-    book: str = "pinnacle",
+    model_name: str = "glm_poisson",
+    book: str = "draftkings",
     use_negbinom: bool = True,
     output_path: str | None = None,
     db_path: str = "data/mlb.db",
@@ -517,6 +532,7 @@ def simulate(
                    p.model_name, p.model_version,
                    p.lambda_home, p.lambda_away,
                    p.dispersion_alpha,
+                   p.over_prob AS stored_over_prob,
                    g.date, g.home_team, g.away_team,
                    g.home_score, g.away_score,
                    o.total_close,
@@ -529,8 +545,10 @@ def simulate(
                AND o.book        = ?
             WHERE g.date BETWEEN ? AND ?
               AND p.model_name   LIKE ?
-              AND p.lambda_home  IS NOT NULL
-              AND p.lambda_away  IS NOT NULL
+              AND (
+                    (p.lambda_home IS NOT NULL AND p.lambda_away IS NOT NULL)
+                    OR p.over_prob IS NOT NULL
+              )
               AND o.total_close  IS NOT NULL
               AND o.over_odds_close  IS NOT NULL
               AND o.under_odds_close IS NOT NULL
@@ -559,26 +577,39 @@ def simulate(
 
     for row in rows:
         game_date = row["date"]
-        lam_h = float(row["lambda_home"])
-        lam_a = float(row["lambda_away"])
+        lam_h_raw = row["lambda_home"]
+        lam_a_raw = row["lambda_away"]
+        lam_h = float(lam_h_raw) if lam_h_raw is not None else 0.0
+        lam_a = float(lam_a_raw) if lam_a_raw is not None else 0.0
         alpha = row["dispersion_alpha"]
+        stored_over_prob = row["stored_over_prob"]
         line = float(row["total_close"])
         over_odds = int(row["over_odds_close"])
         under_odds = int(row["under_odds_close"])
         actual_total = int(row["home_score"]) + int(row["away_score"])
 
-        # Fair devigged price for the over
+        # Raw implied prices from closing odds (include the vig)
         raw_over = american_to_price(over_odds)
         raw_under = american_to_price(under_odds)
+        # Devigged fair price is kept only as a reference / logging column
         fair_over, _ = devig_prices(raw_over, raw_under)
+        vig_pct = round((raw_over + raw_under - 1.0) * 100.0, 2)
 
-        # Model P(over) against closing line
-        if use_negbinom and alpha is not None and alpha > 0:
-            over_prob = p_over_negbinom(lam_h, lam_a, float(alpha), line)
+        # Model P(over) against closing line:
+        # binary model (lam_h == 0.0 sentinel) → use stored calibrated probability
+        # Poisson/NegBinom model → compute via convolution
+        if lam_h > 0.01:
+            if use_negbinom and alpha is not None and alpha > 0:
+                over_prob = p_over_negbinom(lam_h, lam_a, float(alpha), line)
+            else:
+                over_prob = p_over_poisson(lam_h, lam_a, line)
         else:
-            over_prob = p_over_poisson(lam_h, lam_a, line)
+            if stored_over_prob is None:
+                continue
+            over_prob = float(stored_over_prob)
 
-        ev_result = compute_ev(over_prob, fair_over, min_edge=min_edge)
+        # EV and Kelly use raw (vig-inclusive) prices — realistic sportsbook fill cost
+        ev_result = compute_ev(over_prob, raw_over, min_edge=min_edge)
         bet_side = ev_result["bet_side"]
 
         # Position limit per date
@@ -588,7 +619,8 @@ def simulate(
             continue
 
         win_prob = over_prob if bet_side == "OVER" else (1.0 - over_prob)
-        bet_price = fair_over if bet_side == "OVER" else (1.0 - fair_over)
+        # Actual fill price includes vig — different for each side when line is off-centre
+        bet_price = raw_over if bet_side == "OVER" else raw_under
         kelly = kelly_bet(win_prob, bet_price, kelly_mult=kelly_mult)
 
         if kelly <= 0:
@@ -604,7 +636,7 @@ def simulate(
             pnl = 0.0
             outcome = "PUSH"
         elif won:
-            b = (1.0 / bet_price) - 1.0
+            b = (1.0 / bet_price) - 1.0  # net odds at actual fill price (with vig)
             pnl = stake * b
             outcome = "WIN"
         else:
@@ -626,7 +658,9 @@ def simulate(
                 "away_team": row["away_team"],
                 "line": line,
                 "over_prob": round(over_prob, 4),
+                "raw_over": round(raw_over, 4),
                 "fair_over": round(fair_over, 4),
+                "vig_pct": vig_pct,
                 "edge": round(ev_result["edge"], 4),
                 "bet_side": bet_side,
                 "stake": round(stake, 2),
@@ -689,6 +723,287 @@ def simulate(
         "max_drawdown": round(max_drawdown, 2),
         "sharpe": round(sharpe, 3),
         "avg_clv": round(avg_clv, 4),
+        "bankroll_final": round(float(bankroll), 2),
+        "bankroll_peak": round(float(bankroll_curve.max()), 2),
+    }
+
+    if output_path:
+        _path = Path(output_path)
+        _path.parent.mkdir(parents=True, exist_ok=True)
+        df_bets.to_csv(_path, index=False)
+        logger.info("Per-bet detail saved to %s", _path)
+
+    return summary
+
+
+# ── Kalshi-based simulation (full-game and F5) ─────────────────────────────────
+
+
+def simulate_kalshi(
+    start: str = "2025-04-01",
+    end: str = "2025-10-01",
+    target: str = "fullgame",
+    min_edge: float = MIN_EDGE,
+    kelly_mult: float = KELLY_MULT,
+    initial_bankroll: float = 1000.0,
+    model_name: str = "hgbr_poisson",
+    output_path: str | None = None,
+    db_path: str = "data/mlb.db",
+) -> dict[str, Any]:
+    """
+    Betting simulation using Kalshi market prices as the benchmark.
+
+    For each game in the window, iterates over every available Kalshi line and
+    picks the one with the highest |EV|.  Outcome is determined from the actual
+    game score stored in the games table.
+
+    Supports both full-game (``target='fullgame'``) and F5 (``target='f5'``)
+    modes.  For F5 the simulation joins Kalshi ``f5_total_over`` markets and
+    uses ``f5_total_runs`` as the actual outcome.
+
+    Parameters
+    ----------
+    start : str
+        Simulation start date (inclusive).
+    end : str
+        Simulation end date (inclusive).
+    target : str
+        ``'fullgame'`` or ``'f5'``.
+    min_edge : float
+        Minimum EV threshold to place a bet.
+    kelly_mult : float
+        Fractional Kelly multiplier.
+    initial_bankroll : float
+        Starting bankroll in dollars.
+    model_name : str
+        Filter on predictions.model_name.
+    output_path : str or None
+        If set, write per-bet detail to this CSV path.
+    db_path : str
+
+    Returns
+    -------
+    dict
+        Summary statistics.
+    """
+    market_type = "f5_total_over" if target == "f5" else "total_over"
+
+    with get_conn(db_path) as conn:
+        # Load model predictions joined to Kalshi markets for the window.
+        # Each row is one (prediction, Kalshi-line) pair — one game can have
+        # multiple lines; we pick the best EV in Python.
+        _select_f5 = (
+            "SELECT p.game_id, p.model_name, p.model_version,"
+            " p.lambda_home, p.lambda_away, p.dispersion_alpha,"
+            " g.date, g.home_team, g.away_team,"
+            " g.f5_total_runs AS actual_result,"
+            " km.line AS kalshi_line, km.mid_price AS kalshi_price,"
+            " km.result AS kalshi_result"
+            " FROM predictions p JOIN games g ON p.game_id = g.game_id"
+            " JOIN kalshi_markets km ON km.game_id = p.game_id"
+            "   AND km.market_type = ?"
+            " WHERE g.date BETWEEN ? AND ? AND p.model_name LIKE ?"
+            "   AND p.lambda_home IS NOT NULL AND p.lambda_away IS NOT NULL"
+            "   AND km.mid_price BETWEEN 0.03 AND 0.97"
+            "   AND km.yes_bid > 0.01 AND km.yes_ask < 0.99"
+            "   AND km.line IS NOT NULL"
+            "   AND g.f5_total_runs IS NOT NULL"
+            " ORDER BY g.date, p.game_id, km.line"
+        )
+        _select_fg = (
+            "SELECT p.game_id, p.model_name, p.model_version,"
+            " p.lambda_home, p.lambda_away, p.dispersion_alpha,"
+            " g.date, g.home_team, g.away_team,"
+            " (g.home_score + g.away_score) AS actual_result,"
+            " km.line AS kalshi_line, km.mid_price AS kalshi_price,"
+            " km.result AS kalshi_result"
+            " FROM predictions p JOIN games g ON p.game_id = g.game_id"
+            " JOIN kalshi_markets km ON km.game_id = p.game_id"
+            "   AND km.market_type = ?"
+            " WHERE g.date BETWEEN ? AND ? AND p.model_name LIKE ?"
+            "   AND p.lambda_home IS NOT NULL AND p.lambda_away IS NOT NULL"
+            "   AND km.mid_price BETWEEN 0.03 AND 0.97"
+            "   AND km.yes_bid > 0.01 AND km.yes_ask < 0.99"
+            "   AND km.line IS NOT NULL"
+            "   AND g.home_score IS NOT NULL AND g.away_score IS NOT NULL"
+            " ORDER BY g.date, p.game_id, km.line"
+        )
+        sql = _select_f5 if target == "f5" else _select_fg
+        rows = conn.execute(sql, (market_type, start, end, f"{model_name}%")).fetchall()
+
+    if not rows:
+        logger.warning(
+            "No Kalshi simulation data found for %s–%s target=%s model=%s",
+            start,
+            end,
+            target,
+            model_name,
+        )
+        return {}
+
+    # Group rows by (date, game_id) — pick the best-EV line per game
+    from collections import defaultdict
+
+    game_lines: dict[tuple[str, str], list] = defaultdict(list)
+    for row in rows:
+        key = (row["date"], row["game_id"])
+        game_lines[key].append(dict(row))
+
+    logger.info(
+        "Kalshi simulation: %d games across %d (game, line) pairs (%s to %s)",
+        len(game_lines),
+        len(rows),
+        start,
+        end,
+    )
+
+    bankroll = initial_bankroll
+    bet_log: list[dict[str, Any]] = []
+    positions_by_date: dict[str, int] = {}
+
+    for (game_date, game_id), lines in sorted(game_lines.items()):
+        n_open = positions_by_date.get(game_date, 0)
+        if n_open >= MAX_POSITIONS:
+            continue
+
+        best_ev = 0.0
+        best_bet: dict[str, Any] | None = None
+
+        for row in lines:
+            lam_h = float(row["lambda_home"])
+            lam_a = float(row["lambda_away"])
+            alpha = row["dispersion_alpha"]
+            line = float(row["kalshi_line"])
+            price = float(row["kalshi_price"])
+
+            if alpha is not None and alpha > 0:
+                over_prob = p_over_negbinom(lam_h, lam_a, float(alpha), line)
+            else:
+                over_prob = p_over_poisson(lam_h, lam_a, line)
+
+            ev_result = compute_ev(over_prob, price, min_edge=min_edge)
+            candidate_ev = max(abs(ev_result["ev_over"]), abs(ev_result["ev_under"]))
+
+            if ev_result["bet_side"] != "PASS" and candidate_ev > best_ev:
+                best_ev = candidate_ev
+                best_bet = {
+                    "line": line,
+                    "price": price,
+                    "over_prob": over_prob,
+                    "bet_side": ev_result["bet_side"],
+                    "edge": ev_result["edge"],
+                    "row": row,
+                }
+
+        if best_bet is None:
+            continue
+
+        row = best_bet["row"]
+        bet_side = best_bet["bet_side"]
+        over_prob = best_bet["over_prob"]
+        price = best_bet["price"]
+        line = best_bet["line"]
+        actual = row["actual_result"]
+
+        win_prob = over_prob if bet_side == "OVER" else (1.0 - over_prob)
+        bet_price = price if bet_side == "OVER" else (1.0 - price)
+        kelly = kelly_bet(win_prob, bet_price, kelly_mult=kelly_mult)
+
+        if kelly <= 0:
+            continue
+
+        stake = bankroll * kelly
+
+        # Kalshi stores integer N meaning "Over N+0.5" in UI.
+        # YES (OVER) wins if actual > N (i.e. actual >= N+1).
+        # NO  (UNDER) wins if actual <= N (i.e. actual < N+1).
+        # No pushes possible with half-line markets.
+        if bet_side == "OVER":
+            won = actual > line
+            push = False
+        else:
+            won = actual <= line
+            push = False
+
+        if push:
+            pnl = 0.0
+            outcome = "PUSH"
+        elif won:
+            b = (1.0 / bet_price) - 1.0
+            pnl = stake * b
+            outcome = "WIN"
+        else:
+            pnl = -stake
+            outcome = "LOSS"
+
+        bankroll += pnl
+        positions_by_date[game_date] = n_open + 1
+
+        bet_log.append(
+            {
+                "date": game_date,
+                "game_id": game_id,
+                "home_team": row["home_team"],
+                "away_team": row["away_team"],
+                "target": target,
+                "line": line,
+                "over_prob": round(over_prob, 4),
+                "kalshi_price": round(price, 4),
+                "edge": round(best_bet["edge"], 4),
+                "bet_side": bet_side,
+                "stake": round(stake, 2),
+                "kelly_fraction": round(kelly, 4),
+                "outcome": outcome,
+                "pnl": round(pnl, 2),
+                "bankroll_after": round(bankroll, 2),
+                "actual_result": actual,
+            }
+        )
+
+    if not bet_log:
+        logger.warning("No bets placed in Kalshi simulation")
+        return {
+            "games_evaluated": len(game_lines),
+            "bets_placed": 0,
+            "roi": 0.0,
+            "win_rate": 0.0,
+            "max_drawdown": 0.0,
+            "sharpe": 0.0,
+            "bankroll_final": initial_bankroll,
+        }
+
+    df_bets = pd.DataFrame(bet_log)
+
+    total_staked = df_bets["stake"].sum()
+    total_pnl = df_bets["pnl"].sum()
+    roi = (total_pnl / total_staked) * 100.0 if total_staked > 0 else 0.0
+
+    decided = df_bets[df_bets["outcome"] != "PUSH"]
+    win_rate = (decided["outcome"] == "WIN").mean() * 100.0 if len(decided) > 0 else 0.0
+
+    bankroll_curve = np.array([initial_bankroll] + df_bets["bankroll_after"].tolist())
+    peak = np.maximum.accumulate(bankroll_curve)
+    drawdowns = (peak - bankroll_curve) / peak
+    max_drawdown = float(drawdowns.max()) * 100.0
+
+    bet_rois = df_bets["pnl"].values / df_bets["stake"].values
+    sharpe = float(np.mean(bet_rois) / np.std(bet_rois)) if np.std(bet_rois) > 0 else 0.0
+
+    summary: dict[str, Any] = {
+        "target": target,
+        "market": market_type,
+        "games_evaluated": len(game_lines),
+        "bets_placed": len(df_bets),
+        "bet_pct": round(len(df_bets) / len(game_lines) * 100.0, 1),
+        "wins": int((df_bets["outcome"] == "WIN").sum()),
+        "losses": int((df_bets["outcome"] == "LOSS").sum()),
+        "pushes": int((df_bets["outcome"] == "PUSH").sum()),
+        "win_rate": round(win_rate, 1),
+        "total_staked": round(total_staked, 2),
+        "total_pnl": round(total_pnl, 2),
+        "roi": round(roi, 2),
+        "max_drawdown": round(max_drawdown, 2),
+        "sharpe": round(sharpe, 3),
         "bankroll_final": round(float(bankroll), 2),
         "bankroll_peak": round(float(bankroll_curve.max()), 2),
     }
@@ -770,7 +1085,8 @@ def _print_simulation_report(summary: dict[str, Any], params: dict[str, Any]) ->
     print()
     print("=" * 60)
     print(f"BETTING SIMULATION: {params['start']} to {params['end']}")
-    print(f"  Market benchmark:  SBR {params['book'].capitalize()} closing line")
+    book = params["book"].capitalize()
+    print(f"  Market benchmark:  SBR {book} closing line (vig-inclusive fill)")
     print(f"  Min edge:          ${params['min_edge']:.2f}")
     print(f"  Kelly multiplier:  {params['kelly_mult']:.2f}x")
     print(f"  Initial bankroll:  ${params['initial_bankroll']:,.0f}")
@@ -799,17 +1115,17 @@ def _print_simulation_report(summary: dict[str, Any], params: dict[str, Any]) ->
     print()
     go = summary["roi"] > 0 and summary["sharpe"] > 0.5 and summary["avg_clv"] >= 0
     if go:
-        print("  ✓ GO: ROI positive, Sharpe > 0.5, CLV ≥ 0")
+        print("  GO: ROI positive, Sharpe > 0.5, CLV >= 0")
         print("    Model is ready for paper trading.")
     else:
         reasons = []
         if summary["roi"] <= 0:
-            reasons.append(f"ROI {summary['roi']:+.2f}% ≤ 0")
+            reasons.append(f"ROI {summary['roi']:+.2f}% <= 0")
         if summary["sharpe"] <= 0.5:
-            reasons.append(f"Sharpe {summary['sharpe']:.3f} ≤ 0.5")
+            reasons.append(f"Sharpe {summary['sharpe']:.3f} <= 0.5")
         if summary["avg_clv"] < 0:
             reasons.append(f"avg CLV {summary['avg_clv']:+.4f} < 0")
-        print(f"  ✗ NO-GO: {'; '.join(reasons)}")
+        print(f"  NO-GO: {'; '.join(reasons)}")
         print("    Do not proceed to live trading.")
     print()
 
@@ -847,9 +1163,23 @@ if __name__ == "__main__":
     clv_p.add_argument("--date", default=None)
     clv_p.add_argument("--db", default="data/mlb.db")
 
+    # -- Kalshi-based simulation (full-game and F5)
+    ksim_p = subparsers.add_parser("simulate-kalshi", help="Simulation vs Kalshi prices")
+    ksim_p.add_argument("--start", default="2025-04-01")
+    ksim_p.add_argument("--end", default="2025-10-01")
+    ksim_p.add_argument("--target", choices=["fullgame", "f5"], default="fullgame")
+    ksim_p.add_argument("--min-edge", type=float, default=MIN_EDGE)
+    ksim_p.add_argument("--kelly-mult", type=float, default=KELLY_MULT)
+    ksim_p.add_argument("--initial-bankroll", type=float, default=1000.0)
+    ksim_p.add_argument("--model", default="hgbr_poisson")
+    ksim_p.add_argument("--output", default=None)
+    ksim_p.add_argument("--db", default="data/mlb.db")
+
     # Legacy flat flags for backward compatibility with /backtest skill
     parser.add_argument("--date", default=None)
     parser.add_argument("--simulate", action="store_true")
+    parser.add_argument("--simulate-kalshi", action="store_true", dest="simulate_kalshi")
+    parser.add_argument("--target", choices=["fullgame", "f5"], default="fullgame")
     parser.add_argument("--start", default="2021-04-01")
     parser.add_argument("--end", default="2024-10-01")
     parser.add_argument("--min-edge", type=float, default=MIN_EDGE)
@@ -862,7 +1192,47 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.command == "simulate" or getattr(args, "simulate", False):
+    if args.command == "simulate-kalshi" or getattr(args, "simulate_kalshi", False):
+        target = getattr(args, "target", "fullgame")
+        start = getattr(args, "start", "2025-04-01")
+        end = getattr(args, "end", "2025-10-01")
+        summary = simulate_kalshi(
+            start=start,
+            end=end,
+            target=target,
+            min_edge=getattr(args, "min_edge", MIN_EDGE),
+            kelly_mult=getattr(args, "kelly_mult", KELLY_MULT),
+            initial_bankroll=getattr(args, "initial_bankroll", 1000.0),
+            model_name=getattr(args, "model", "hgbr_poisson"),
+            output_path=args.output,
+            db_path=args.db,
+        )
+        if summary:
+            print()
+            print("=" * 60)
+            print(f"KALSHI SIMULATION ({target.upper()}): {start} to {end}")
+            print(f"  Market:            Kalshi {summary['market']}")
+            print(f"  Min edge:          ${getattr(args, 'min_edge', MIN_EDGE):.2f}")
+            print(f"  Kelly multiplier:  {getattr(args, 'kelly_mult', KELLY_MULT):.2f}x")
+            print(f"  Initial bankroll:  ${getattr(args, 'initial_bankroll', 1000.0):,.0f}")
+            print("=" * 60)
+            print(f"  Games evaluated:   {summary['games_evaluated']:,}")
+            print(f"  Bets placed:       {summary['bets_placed']:,}  ({summary['bet_pct']:.1f}%)")
+            wins, losses, pushes = summary["wins"], summary["losses"], summary["pushes"]
+            print(f"  Record:            {wins}W - {losses}L - {pushes}P")
+            print(f"  Win rate:          {summary['win_rate']:.1f}%")
+            print(f"  ROI:               {summary['roi']:+.2f}%")
+            print(f"  Max drawdown:      -{summary['max_drawdown']:.1f}%")
+            print(f"  Sharpe ratio:      {summary['sharpe']:.3f}")
+            bf = summary["bankroll_final"]
+            bp = summary["bankroll_peak"]
+            print(f"  Bankroll final:    ${bf:,.2f}  (peak: ${bp:,.2f})")
+            print("=" * 60)
+            go = summary["roi"] > 0 and summary["sharpe"] > 0.5
+            print("  GO" if go else "  NO-GO")
+            print()
+
+    elif args.command == "simulate" or getattr(args, "simulate", False):
         summary = simulate(
             start=getattr(args, "start", "2021-04-01"),
             end=getattr(args, "end", "2024-10-01"),

@@ -6,7 +6,6 @@ Float comparisons use np.testing.assert_allclose(rtol=1e-6, atol=1e-4).
 """
 
 import numpy as np
-import pytest
 
 from mlb.betting import (
     american_to_price,
@@ -17,7 +16,6 @@ from mlb.betting import (
     kelly_bet,
     passes_filters,
 )
-
 
 # ── compute_ev ────────────────────────────────────────────────────────────────
 

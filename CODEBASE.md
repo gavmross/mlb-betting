@@ -8,7 +8,7 @@ the system from scratch.
 ## What This System Does
 
 Predicts total runs scored in MLB games and identifies positive expected-value
-bets on Kalshi totals markets (over/under on total runs per game).
+bets on Kalshi totals markets (over/under on total runs per game). 
 
 The core loop:
 

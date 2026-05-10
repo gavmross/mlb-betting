@@ -31,7 +31,6 @@ from mlb.calibration import (
     verify_convolution_sums_to_one,
 )
 
-
 # ── P(over) Poisson ───────────────────────────────────────────────────────────
 
 

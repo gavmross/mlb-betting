@@ -1,6 +1,6 @@
 # MLB Total Runs Betting System — Architecture Reference
-**Last updated:** 2026-04-04
-**Status:** Pre-implementation spec — all design decisions finalized
+**Last updated:** 2026-05-09
+**Status:** Implementation complete through Phase 5 (Betting Engine)
 
 ---
 
@@ -112,13 +112,18 @@ CREATE TABLE games (
     away_team       TEXT NOT NULL,
     home_score      INTEGER,
     away_score      INTEGER,
-    total_runs      INTEGER,            -- TARGET VARIABLE: home + away runs
+    total_runs      INTEGER,            -- TARGET VARIABLE (full game): home + away runs
+    f5_home_score   INTEGER,            -- F5 target: home runs in innings 1-5
+    f5_away_score   INTEGER,            -- F5 target: away runs in innings 1-5
+    f5_total_runs   INTEGER,            -- F5 target: f5_home + f5_away (KXMLBF5TOTAL)
     venue           TEXT,
     game_time_et    TEXT,
     status          TEXT DEFAULT 'scheduled',
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now'))
 );
+-- Schema change 2026-05-09: Added f5_home_score, f5_away_score, f5_total_runs
+-- for First 5 Innings model target (KXMLBF5TOTAL betting market)
 CREATE INDEX idx_games_date ON games(date);
 CREATE INDEX idx_games_season ON games(season);
 CREATE INDEX idx_games_home ON games(home_team, date);
@@ -330,9 +335,12 @@ CREATE TABLE scrape_log (
 | **MLB Stats API** | Schedule, lineups, probable pitchers | pip package | Free | 2010–present |
 | **sbrscrape** | Totals + ML odds per sportsbook | pip package | Free | 2021–present |
 | **Open-Meteo** | Historical + forecast weather | REST, no key | Free | 1940–present |
-| **Kalshi REST** | Live + historical prices | REST + RSA auth | Free | 2025–present |
-| **Kalshi WebSocket** | Real-time price stream | WebSocket | Free | Live only |
-| **Polymarket Gamma** | MLB prices, read-only | REST, no auth | Free | 2025–present |
+| **Kalshi REST** | Live + historical prices | REST + RSA auth | Free | 2026–present |
+| **Polymarket Gamma** | MLB prices, read-only | REST, no auth | Free | 2026–present |
+
+**Note on SBR books:** sbrscrape captures DraftKings, FanDuel, Caesars, Bet365, BetMGM.
+Pinnacle exited the US market and is not available. Use DraftKings as the simulation benchmark
+(most liquid US book). Kalshi totals data starts at 2026 Opening Day (2026-03-31).
 
 ---
 
@@ -369,68 +377,80 @@ df['sp_siera_l5'] = (
 df['sp_siera_l5'] = df.groupby('pitcher_id')['siera_game'].rolling(5).mean()
 ```
 
-### Feature Groups
+### Feature Groups (53 total — matches `FEATURE_COLS` in `mlb/features.py`)
 
-**A: Starting Pitchers — both SPs, symmetric (totals are not home/away asymmetric)**
+**A: Starting Pitchers — both SPs**
 ```
-home_sp_siera_season   away_sp_siera_season   # best ERA estimator
-home_sp_fip_season     away_sp_fip_season
-home_sp_era_l3         away_sp_era_l3         # recent form (last 3 starts)
-home_sp_k9_season      away_sp_k9_season      # strikeouts suppress runs
-home_sp_bb9_season     away_sp_bb9_season
-home_sp_days_rest      away_sp_days_rest
-home_sp_velocity_l3    away_sp_velocity_l3    # Statcast velo trend
-sp_siera_combined                              # sum of both (total run suppression)
-sp_k9_combined
+home_sp_era_season   away_sp_era_season   # season ERA (capped at 13.5 = 3× avg)
+home_sp_fip_season   away_sp_fip_season   # fielding-independent pitching
+home_sp_k9_season    away_sp_k9_season    # strikeout rate (suppresses runs)
+home_sp_bb9_season   away_sp_bb9_season   # walk rate
+home_sp_days_rest    away_sp_days_rest    # rest days before start
+home_sp_era_l3       away_sp_era_l3       # ERA over last 3 starts (recent form)
+home_sp_er_pg_l5     away_sp_er_pg_l5     # earned runs per start, last 5 (raw momentum)
+sp_fip_combined      sp_k9_combined       # sum of both SPs (total run suppression)
+sp_era_l3_combined   sp_er_pg_l5_combined
 ```
 
 **B: Team Offense — both teams**
 ```
-home_ops_10d     away_ops_10d
-home_woba_10d    away_woba_10d
-home_wrc_plus    away_wrc_plus
-home_k_pct_10d   away_k_pct_10d    # high K% = fewer baserunners = fewer runs
-ops_combined     woba_combined     k_pct_combined
+home_ops_10d     away_ops_10d       # rolling 10-game OPS
+home_k_pct_10d   away_k_pct_10d    # rolling strikeout rate (fewer baserunners = fewer runs)
+home_runs_10d    away_runs_10d     # rolling 10-game avg runs scored (momentum)
 ```
 
 **C: Bullpen — both teams**
 ```
 home_bullpen_era_7d    away_bullpen_era_7d
 home_bullpen_era_30d   away_bullpen_era_30d
-home_bullpen_ip_7d     away_bullpen_ip_7d    # fatigue proxy
+home_bullpen_ip_7d     away_bullpen_ip_7d    # innings pitched (fatigue proxy)
 ```
 
 **D: Park Factors — critical for run totals**
 ```
-park_run_factor        # Coors=1.26, Petco=0.89 (FanGraphs 3yr regressed)
+park_run_factor    # Coors=1.26, Petco=0.89 (FanGraphs 3yr regressed)
 park_hr_factor
-park_elevation_ft      # altitude — ball carries farther at Coors
+park_elevation_ft  # altitude — ball carries farther at Coors
 is_dome
 ```
 
 **E: Weather — game-day, from Open-Meteo**
 ```
-temp_f                 # cold suppresses scoring
+temp_f               # cold suppresses scoring
 wind_speed_mph
-wind_dir_out           # 1 if blowing toward OF (boosts runs)
-wind_dir_in            # 1 if blowing in from OF (suppresses runs)
-wind_dir_cross
+wind_dir_out         # blowing toward OF (boosts runs)
+wind_dir_in          # blowing in from OF (suppresses runs)
+wind_dir_cross_right
+wind_dir_cross_left
 precip_prob
 humidity
 is_night_game
 ```
 
-**F: Market Signal — SBR 2021+, with shift(1)**
+**F: Market Signal — SBR closing lines (2021+)**
 ```
-total_line_open        # opening total line
-line_movement          # close - open (sharp money proxy)
+total_line_open    # opening total line
+total_line_close   # closing total line (primary market consensus)
+line_movement      # close − open (sharp money proxy)
+```
+
+**F2: Kalshi Cross-Market Signal (F5 vs full-game pricing divergence)**
+```
+kalshi_fullgame_line   # Kalshi full-game over/under line
+kalshi_f5_line         # Kalshi First 5 Innings over/under line
+f5_ratio               # f5_line / fullgame_line — encodes expected run distribution
+                       # ~0.5 = uniform; >0.5 = front-loaded; <0.5 = back-loaded
 ```
 
 **G: Team Strength**
 ```
-elo_home   elo_away
-win_pct_10d_home   win_pct_10d_away
-run_diff_pg_season_home   run_diff_pg_season_away
+home_win_pct_10d          away_win_pct_10d          # rolling 10-game win %
+home_run_diff_pg_season   away_run_diff_pg_season   # season run differential per game
+```
+
+**Elo**
+```
+elo_home   elo_away   # zero-sum Elo ratings updated after every game
 ```
 
 ### Wind Direction Encoding
@@ -483,25 +503,55 @@ lambda_home = glm_home.predict(X_test)   # expected home runs
 lambda_away = glm_away.predict(X_test)   # expected away runs
 ```
 
-### Model 2: Gradient Boosting Regressor with Poisson Loss (Primary)
+### Model 2: HistGradientBoostingRegressor with Poisson Loss (Primary Poisson model, `hgbr_poisson`)
 ```python
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
 
-gbr_home = GradientBoostingRegressor(
-    loss='poisson',       # optimizes Poisson deviance, not squared error
-    n_estimators=300,
-    max_depth=3,          # shallow — sports prediction has limited signal
+# Histogram-based GBR — faster than GradientBoostingRegressor, handles NaN natively
+hgbr_home = HistGradientBoostingRegressor(
+    loss='poisson',         # optimizes Poisson deviance, not squared error
+    max_iter=300,
+    max_depth=4,
     learning_rate=0.05,
-    subsample=0.8,
     min_samples_leaf=20,
-    random_state=42
+    l2_regularization=0.1,
+    random_state=42,
 )
-gbr_away = GradientBoostingRegressor(loss='poisson', n_estimators=300,
-    max_depth=3, learning_rate=0.05, subsample=0.8,
-    min_samples_leaf=20, random_state=42)
+hgbr_away = HistGradientBoostingRegressor(loss='poisson', max_iter=300,
+    max_depth=4, learning_rate=0.05, min_samples_leaf=20, random_state=42)
 ```
 
 Output is λ (expected runs) — same interface as PoissonRegressor.
+
+### Model 3: LightGBM Binary Classifier (Primary Betting Model, `lgbm_binary`)
+```python
+import lightgbm as lgb
+
+# Trained directly on over/under outcome (binary classification)
+# Target: 1 if actual_total > total_line_close, 0 otherwise
+# Outputs calibrated P(over) after isotonic calibration on OOF predictions
+lgbm = lgb.LGBMClassifier(
+    objective='binary',
+    n_estimators=500,
+    learning_rate=0.03,
+    max_depth=4,
+    num_leaves=31,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    min_child_samples=30,
+    reg_alpha=0.1,
+    reg_lambda=0.1,
+    random_state=42,
+)
+```
+
+Walk-forward CV produces OOF predicted probabilities; an isotonic calibrator is fit on those OOF
+samples and applied to all predictions. Artefact saved as `data/models/lgbm_binary_v1.0.0.pkl`.
+
+**Current CV performance (2022–2024, 5 folds):**
+```
+oof_log_loss = 0.7239  |  oof_auc = 0.5076  |  oof_brier = 0.2635
+```
 
 ### Walk-Forward CV
 ```python

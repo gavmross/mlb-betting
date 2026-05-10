@@ -4,6 +4,7 @@ Populated further by Claude Code at Step 13 (tests/unit/).
 """
 
 import sqlite3
+
 import pytest
 
 

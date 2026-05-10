@@ -29,7 +29,6 @@ from mlb.model import (
     walk_forward_cv,
 )
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -216,7 +215,6 @@ def test_walk_forward_cv_glm_smoke(small_feature_df):
 
 def test_predictions_positive(small_feature_df):
     """Lambda predictions must be > 0 for all games."""
-    from sklearn.pipeline import Pipeline
 
     X, y_home, y_away = _prepare_xy(small_feature_df)
     m_home = make_poisson_glm()

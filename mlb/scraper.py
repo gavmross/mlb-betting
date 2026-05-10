@@ -319,7 +319,6 @@ def _insert_team_stats(conn, game_id: str, box) -> None:
         runs = batting.get("runs")
         hits = batting.get("hits")
         errors_stat = side.team_stats.get("fielding", {}).get("errors")
-        at_bats = batting.get("atBats") or 0
         pa = batting.get("plateAppearances") or 0
         k_val = batting.get("strikeOuts")
         bb_val = batting.get("baseOnBalls")
@@ -444,6 +443,169 @@ def _insert_pitchers(conn, game_id: str, box) -> None:
                     hr9,
                 ),
             )
+
+
+# ── F5 (First 5 Innings) backfill ─────────────────────────────────────────────
+
+F5_LINESCORE_DIR: Path = Path("data/raw/statsapi")
+
+
+def _fetch_linescore_for_date(date_str: str) -> list[dict]:
+    """
+    Fetch per-game linescore data for a date from the MLB Stats API.
+
+    Uses ``data/raw/statsapi/linescore_{date}.json`` as a cache.
+
+    Parameters
+    ----------
+    date_str : str
+        Date in ``YYYY-MM-DD`` format.
+
+    Returns
+    -------
+    list[dict]
+        Each element: ``{'game_pk': int, 'innings': list[dict]}``.
+        Innings list is in order; each dict has ``{'home': {'runs': int, ...},
+        'away': {...}}``.
+    """
+    cache_file = f"linescore_{date_str}.json"
+    cached = _load_cache(cache_file)
+    if cached is not None:
+        return cached
+
+    import requests
+
+    url = "https://statsapi.mlb.com/api/v1/schedule"
+    params = {"sportId": 1, "date": date_str, "hydrate": "linescore"}
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as exc:
+        logger.error("Linescore fetch failed for %s: %s", date_str, exc)
+        return []
+
+    results: list[dict] = []
+    for date_block in data.get("dates", []):
+        for g in date_block.get("games", []):
+            game_pk = g.get("gamePk")
+            status = g.get("status", {}).get("abstractGameState", "")
+            if status != "Final":
+                continue
+            innings = g.get("linescore", {}).get("innings", [])
+            results.append({"game_pk": game_pk, "innings": innings})
+
+    _save_cache(cache_file, results)
+    return results
+
+
+def _compute_f5(innings: list[dict]) -> tuple[int | None, int | None]:
+    """
+    Sum runs scored in innings 1-5 for home and away teams.
+
+    Parameters
+    ----------
+    innings : list[dict]
+        Ordered inning list from the linescore API (1-indexed by ``num``).
+
+    Returns
+    -------
+    tuple[int | None, int | None]
+        ``(f5_home, f5_away)`` — None if fewer than 5 innings available.
+    """
+    f5_innings = [inn for inn in innings if inn.get("num", 0) <= 5]
+    if len(f5_innings) < 5:
+        return None, None
+    home = sum(inn.get("home", {}).get("runs", 0) or 0 for inn in f5_innings)
+    away = sum(inn.get("away", {}).get("runs", 0) or 0 for inn in f5_innings)
+    return home, away
+
+
+def backfill_f5_scores(
+    db_path: str = "data/mlb.db",
+    force: bool = False,
+) -> None:
+    """
+    Backfill f5_home_score, f5_away_score, f5_total_runs for all Final games.
+
+    Fetches the MLB Stats API schedule with linescore hydration one date at a
+    time, caches results, and updates the games table. Skips dates already
+    filled unless ``force=True``.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to SQLite database.
+    force : bool
+        Re-fetch and overwrite even if f5 columns are already populated.
+    """
+    with get_conn(db_path) as conn:
+        if force:
+            rows = conn.execute(
+                "SELECT DISTINCT date FROM games WHERE status='Final' ORDER BY date"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT DISTINCT date FROM games
+                   WHERE status='Final' AND f5_total_runs IS NULL
+                   ORDER BY date"""
+            ).fetchall()
+
+    dates = [r[0] for r in rows]
+    logger.info("F5 backfill: %d dates to process", len(dates))
+
+    updated_total = 0
+    for i, date_str in enumerate(dates):
+        linescore_rows = _fetch_linescore_for_date(date_str)
+        if not linescore_rows:
+            if i % 50 == 0:
+                logger.info("F5 backfill progress: %d/%d dates", i, len(dates))
+            time.sleep(RATE_LIMIT_S)
+            continue
+
+        # Build game_pk → (f5_home, f5_away) map
+        f5_map: dict[int, tuple[int | None, int | None]] = {}
+        for row in linescore_rows:
+            f5_home, f5_away = _compute_f5(row["innings"])
+            if f5_home is not None:
+                f5_map[row["game_pk"]] = (f5_home, f5_away)
+
+        if not f5_map:
+            time.sleep(RATE_LIMIT_S)
+            continue
+
+        with get_conn(db_path) as conn:
+            # game_id in DB is the numeric gamePk stored as TEXT
+            db_games = conn.execute(
+                "SELECT game_id FROM games WHERE date=? AND status='Final'",
+                (date_str,),
+            ).fetchall()
+            for (game_id,) in db_games:
+                try:
+                    gk = int(game_id)
+                except (ValueError, TypeError):
+                    continue
+                if gk in f5_map:
+                    f5h, f5a = f5_map[gk]
+                    conn.execute(
+                        """UPDATE games
+                           SET f5_home_score=?, f5_away_score=?, f5_total_runs=?,
+                               updated_at=datetime('now')
+                           WHERE game_id=?""",
+                        (f5h, f5a, f5h + f5a, str(gk)),
+                    )
+                    updated_total += 1
+
+        if i % 50 == 0:
+            logger.info(
+                "F5 backfill progress: %d/%d dates, %d games updated",
+                i,
+                len(dates),
+                updated_total,
+            )
+        time.sleep(RATE_LIMIT_S)
+
+    logger.info("F5 backfill complete — %d games updated", updated_total)
 
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
@@ -595,6 +757,19 @@ if __name__ == "__main__":
         action="store_true",
         help="Only fetch dates not yet in the DB",
     )
+    parser.add_argument(
+        "--backfill-f5",
+        action="store_true",
+        help="Backfill f5_home_score/f5_away_score/f5_total_runs for all Final games",
+    )
+    parser.add_argument(
+        "--force-f5",
+        action="store_true",
+        help="Re-fetch F5 scores even for games already populated",
+    )
     args = parser.parse_args()
 
-    run(start_date=args.start, end_date=args.end, incremental=args.incremental)
+    if args.backfill_f5:
+        backfill_f5_scores(force=args.force_f5)
+    else:
+        run(start_date=args.start, end_date=args.end, incremental=args.incremental)

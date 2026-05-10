@@ -35,7 +35,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Any
 
 from mlb.db import get_conn
@@ -393,7 +393,6 @@ def snapshot_prices(
         return 0
 
     updated = 0
-    snapshot_ts = datetime.now(tz=timezone.utc).isoformat()
 
     with get_conn(db_path) as conn:
         for market in markets:

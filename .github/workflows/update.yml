@@ -48,12 +48,22 @@ jobs:
         env:
           PYTHONPATH: .
 
-      - name: Generate predictions
-        run: python -m mlb.pipeline --date today
+      - name: Snapshot Kalshi prices
+        run: python -m mlb.kalshi --snapshot
         env:
           PYTHONPATH: .
           KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+
+      - name: Generate model predictions
+        run: python -m mlb.model --predict --date today --model lgbm_binary
+        env:
+          PYTHONPATH: .
+
+      - name: Compute EV and bet recommendations
+        run: python -m mlb.betting daily --date today
+        env:
+          PYTHONPATH: .
 
       - name: Save database to cache
         uses: actions/cache/save@v4

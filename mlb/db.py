@@ -7,9 +7,9 @@ schema creation function. All other modules import ``get_conn`` for DB access.
 
 import logging
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS games (
     home_score      INTEGER,
     away_score      INTEGER,
     total_runs      INTEGER,
+    f5_home_score   INTEGER,
+    f5_away_score   INTEGER,
+    f5_total_runs   INTEGER,
     venue           TEXT,
     game_time_et    TEXT,
     status          TEXT DEFAULT 'scheduled',

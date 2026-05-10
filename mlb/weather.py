@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import openmeteo_requests
@@ -226,7 +226,7 @@ def fetch_weather_for_game(
         return {
             "game_id": game_id,
             "snapshot_type": snapshot_type,
-            "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
+            "fetched_at": datetime.now(tz=UTC).isoformat(),
             "temp_f": None,
             "wind_speed_mph": None,
             "wind_dir_deg": None,
@@ -265,7 +265,7 @@ def fetch_weather_for_game(
     return {
         "game_id": game_id,
         "snapshot_type": snapshot_type,
-        "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
+        "fetched_at": datetime.now(tz=UTC).isoformat(),
         "temp_f": wx["temp_f"],
         "wind_speed_mph": wx["wind_speed_mph"],
         "wind_dir_deg": wx["wind_dir_deg"],

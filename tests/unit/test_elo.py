@@ -26,7 +26,6 @@ from mlb.elo import (
     update_elo,
 )
 
-
 # ── Core math ─────────────────────────────────────────────────────────────────
 
 
@@ -232,8 +231,7 @@ def test_get_elo_before_date():
     team = row["team"]
     # The date stored is the game date — so querying that date should return None
     # (function uses date < ?, not <=)
-    result_same_day = get_elo_before_date(team, row["date"])
-    # For the day AFTER, we should get the stored value
+    # For the day AFTER, we should get the stored value (same-day excluded by date < ? logic)
     from datetime import date, timedelta
 
     next_day = (date.fromisoformat(row["date"]) + timedelta(days=1)).isoformat()

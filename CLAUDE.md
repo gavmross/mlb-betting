@@ -62,18 +62,24 @@ positions. Use Polymarket as a cross-market pricing signal.
 # Install
 pip install -r requirements.txt
 
-# Daily pipeline
-python -m mlb.pipeline --date today
+# Daily pipeline (manual steps — mlb/pipeline.py not yet implemented)
+python -m mlb.scraper --incremental
+python -m mlb.weather --incremental
+python -m mlb.odds_scraper --date today
+python -m mlb.kalshi --snapshot
+python -m mlb.model --predict --date today --model lgbm_binary
+python -m mlb.betting daily --date today
 
 # Incremental data update
 python -m mlb.scraper --incremental
 python -m mlb.weather --incremental
 
 # Train
-python -m mlb.model --train --walk-forward
+python -m mlb.model --train --model lgbm_binary
+python -m mlb.model --backtest --n-splits 5 --model lgbm_binary
 
-# Backtest
-python -m mlb.model --backtest --n-splits 5
+# Backtest simulation
+python -m mlb.betting simulate --start 2022-04-01 --end 2024-10-01 --model lgbm_binary --book draftkings
 
 # Tests
 pytest tests/ -v
@@ -82,12 +88,8 @@ pytest tests/unit/test_features.py -v    # run after every feature change
 # Code quality
 ruff check . && ruff format .
 
-# DB
-sqlite3 data/mlb.db ".schema"
-sqlite3 data/mlb.db "SELECT name, COUNT(*) FROM sqlite_master WHERE type='table'"
-
-# Live monitor
-python -m mlb.live --watch
+# DB inspection (use Python — sqlite3 CLI not available on Windows without extra install)
+python -c "import sqlite3; c=sqlite3.connect('data/mlb.db'); [print(r) for r in c.execute('SELECT name FROM sqlite_master WHERE type=\"table\"').fetchall()]"
 ```
 
 ---
@@ -159,13 +161,16 @@ Hook lifecycle config: @.claude/settings.json
 ## Implementation Phases
 
 ```
-Phase 0: Foundation           repo, schema, pyproject.toml             [ ]
-Phase 1: Data Infrastructure  scraper, odds, weather, Kalshi, Poly     [ ]
-Phase 2: Feature Engineering  no-leakage pipeline, Elo                 [ ]
-Phase 3: Research Notebooks   market analysis, EDA, model compare      [ ]
-Phase 4: Model Layer          PoissonGLM + GBR(poisson), walk-forward, convolution [ ]
-Phase 5: Betting Engine       EV, Kelly, CLV, backtest simulation      [ ]
-Phase 6: Live Pipeline        daily orchestrator, WebSocket monitor    [ ]
+Phase 0: Foundation           repo, schema, pyproject.toml             [x]
+Phase 1: Data Infrastructure  scraper, odds, weather, Kalshi, Poly     [x]
+Phase 2: Feature Engineering  no-leakage pipeline, Elo                 [x]
+Phase 3: Research Notebooks   market analysis, EDA, model compare      [~] (NB 1-2 done, 3-5 in progress)
+Phase 4: Model Layer          PoissonGLM + HGBR(poisson) + lgbm_binary [x]
+Phase 5: Betting Engine       EV, Kelly, CLV, backtest simulation      [x]
+Phase 6: Live Pipeline        daily orchestrator (pipeline.py)         [ ]
+                              WebSocket monitor (live.py)              [ ]
 ```
+
+Update MEMORY.md with current phase, what's done, and blockers at end of each session.
 
 Update MEMORY.md with current phase, what's done, and blockers at end of each session.

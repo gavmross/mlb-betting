@@ -14,6 +14,7 @@ websockets>=12.0
 
 # ── ML & statistics ───────────────────────────────────────────────────────────
 scikit-learn>=1.4.0
+lightgbm>=4.0.0                 # direct binary classifier for P(over) prediction
 scipy>=1.12.0                   # Poisson/NegBinom distributions, convolution
 statsmodels>=0.14.0             # NegativeBinomial GLM if overdispersion confirmed
 numpy>=1.26.0

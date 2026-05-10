@@ -32,7 +32,6 @@ Usage
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -62,6 +61,9 @@ def _load_games(conn, start_date: str | None, end_date: str | None) -> pd.DataFr
                g.home_score AS home_runs,
                g.away_score AS away_runs,
                g.total_runs,
+               g.f5_home_score,
+               g.f5_away_score,
+               g.f5_total_runs,
                g.game_time_et
         FROM games g
         WHERE {where}
@@ -169,6 +171,46 @@ def _load_odds(conn) -> pd.DataFrame:
     return pd.DataFrame([dict(r) for r in rows])
 
 
+def _load_kalshi_lines(conn) -> pd.DataFrame:
+    """
+    Load the most-recent Kalshi full-game and F5 mid-prices per game.
+
+    Returns a DataFrame with one row per game_id containing:
+        kalshi_fullgame_line  : integer line from the full-game market
+        kalshi_f5_line        : integer line from the F5 market
+        f5_ratio              : kalshi_f5_line / kalshi_fullgame_line
+                                (1.0 if full-game only or no F5 market)
+
+    This cross-signal captures mispricing between F5 and full-game markets:
+    if f5_ratio >> 0.5, the market expects a strong back-half; < 0.5 implies
+    a weak bullpen or late-game run environment.
+    """
+    sql = """
+        WITH latest AS (
+            SELECT game_id, market_type, line,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY game_id, market_type
+                       ORDER BY snapshot_ts DESC
+                   ) AS rn
+            FROM kalshi_markets
+            WHERE game_id IS NOT NULL
+              AND market_type IN ('total_over', 'f5_total_over')
+        )
+        SELECT game_id,
+               MAX(CASE WHEN market_type='total_over'    THEN line END) AS kalshi_fullgame_line,
+               MAX(CASE WHEN market_type='f5_total_over' THEN line END) AS kalshi_f5_line
+        FROM latest
+        WHERE rn = 1
+        GROUP BY game_id
+    """
+    rows = conn.execute(sql).fetchall()
+    df = pd.DataFrame([dict(r) for r in rows])
+    if df.empty:
+        return df
+    df["f5_ratio"] = df["kalshi_f5_line"] / df["kalshi_fullgame_line"].replace(0, float("nan"))
+    return df
+
+
 def _load_elo(conn) -> pd.DataFrame:
     """Load most-recent elo rating per team per date (day-of or prior)."""
     sql = """
@@ -234,6 +276,23 @@ def _add_sp_features(games: pd.DataFrame, sp_log: pd.DataFrame) -> pd.DataFrame:
 
     sp["sp_era_l3"] = sp.groupby("pitcher_id", group_keys=False).apply(_era_l3)
 
+    # Raw ER per start over last 5 starts — direct runs-allowed momentum.
+    # Complements era_l3 (which normalises by IP): a 2-inning 5-ER blowout
+    # has the same ERA as a 6-inning 15-ER game but very different total-run impact.
+    sp["sp_er_pg_l5"] = sp.groupby("pitcher_id", group_keys=False).apply(
+        lambda g: g["er_lag"].rolling(5, min_periods=2).mean()
+    )
+
+    # Clip extreme ERA/FIP values caused by early-season tiny-IP samples.
+    # 13.5 ≈ 3× league-average ERA; preserves signal while suppressing noise.
+    ERA_CLIP = 13.5
+    FIP_CLIP_LO, FIP_CLIP_HI = -2.0, 13.5
+    ER_PG_CLIP = 8.0  # ~3× league-average ER/start; rolling avg rarely exceeds this
+    sp["era_season_lag"] = sp["era_season_lag"].clip(upper=ERA_CLIP)
+    sp["fip_season_lag"] = sp["fip_season_lag"].clip(lower=FIP_CLIP_LO, upper=FIP_CLIP_HI)
+    sp["sp_era_l3"] = sp["sp_era_l3"].clip(upper=ERA_CLIP)
+    sp["sp_er_pg_l5"] = sp["sp_er_pg_l5"].clip(upper=ER_PG_CLIP)
+
     # Rename lag columns
     sp = sp.rename(
         columns={
@@ -249,7 +308,7 @@ def _add_sp_features(games: pd.DataFrame, sp_log: pd.DataFrame) -> pd.DataFrame:
         "game_id", "team",
         "sp_era_season", "sp_fip_season", "sp_k9_season",
         "sp_bb9_season", "sp_hr9_season",
-        "sp_era_l3", "days_rest_computed",
+        "sp_era_l3", "sp_er_pg_l5", "days_rest_computed",
     ]
     sp_slim = sp[sp_cols].copy()
 
@@ -279,6 +338,7 @@ def _add_sp_features(games: pd.DataFrame, sp_log: pd.DataFrame) -> pd.DataFrame:
     games["sp_fip_combined"] = games["home_sp_fip_season"] + games["away_sp_fip_season"]
     games["sp_k9_combined"] = games["home_sp_k9_season"] + games["away_sp_k9_season"]
     games["sp_era_l3_combined"] = games["home_sp_era_l3"] + games["away_sp_era_l3"]
+    games["sp_er_pg_l5_combined"] = games["home_sp_er_pg_l5"] + games["away_sp_er_pg_l5"]
 
     return games
 
@@ -313,6 +373,7 @@ def _sp_for_side(sp_slim: pd.DataFrame, games: pd.DataFrame, side: str) -> pd.Da
         "sp_bb9_season": f"{side}_sp_bb9_season",
         "sp_hr9_season": f"{side}_sp_hr9_season",
         "sp_era_l3": f"{side}_sp_era_l3",
+        "sp_er_pg_l5": f"{side}_sp_er_pg_l5",
         "days_rest_computed": f"{side}_sp_days_rest",
     }
     merged = merged.rename(columns=prefix_map)
@@ -362,18 +423,7 @@ def _add_team_offense_features(
     b["runs_lag"] = b.groupby(["team", "season"])["runs"].shift(1)
     b["game_num"] = b.groupby(["team", "season"]).cumcount()  # 0-indexed
 
-    # run_diff_pg: (my runs - opponent runs) / games played so far
-    # We need opponent runs — join back to games to get the other team's runs
-    opp = batting[["game_id", "team", "runs"]].rename(
-        columns={"team": "opp_team", "runs": "opp_runs"}
-    )
-    b2 = b.merge(
-        batting[["game_id", "team", "runs"]].rename(
-            columns={"runs": "my_runs_raw"}
-        ),
-        on=["game_id", "team"],
-    )
-    # Actually simpler: compute cumulative run diff within team+season
+    # run_diff_pg: cumulative season run differential / games played so far
     b["run_diff_lag"] = (
         b.groupby(["team", "season"])["runs"]
         .shift(1)
@@ -454,7 +504,6 @@ def _add_bullpen_features(
 
     games["_date_ts"] = pd.to_datetime(games["date"])
 
-    results: list[dict] = []
     for side in ("home", "away"):
         team_col = f"{side}_team"
         records = []
@@ -539,31 +588,47 @@ def _add_weather_features(games: pd.DataFrame, weather: pd.DataFrame) -> pd.Data
     return games
 
 
-def _add_market_features(games: pd.DataFrame, odds: pd.DataFrame) -> pd.DataFrame:
+def _add_market_features(
+    games: pd.DataFrame,
+    odds: pd.DataFrame,
+    kalshi_lines: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """
-    Join pre-game market totals lines.
+    Join pre-game market totals lines and Kalshi cross-market signals.
 
     These are pre-game signals — no shift needed.
     line_movement = close - open (sharp money proxy; sharp bets move lines).
 
     Features added:
         total_line_open, total_line_close, line_movement
+        kalshi_fullgame_line : Kalshi integer full-game line
+        kalshi_f5_line       : Kalshi integer F5 line
+        f5_ratio             : F5 line / full-game line (mispricing signal)
 
     Parameters
     ----------
     games : pd.DataFrame
     odds : pd.DataFrame
+    kalshi_lines : pd.DataFrame or None
+        Output of ``_load_kalshi_lines()``.
 
     Returns
     -------
     pd.DataFrame
     """
-    if odds.empty:
-        return games
+    if not odds.empty:
+        o = odds.copy()
+        o["line_movement"] = o["total_line_close"] - o["total_line_open"]
+        games = games.merge(o, on="game_id", how="left")
 
-    o = odds.copy()
-    o["line_movement"] = o["total_line_close"] - o["total_line_open"]
-    return games.merge(o, on="game_id", how="left")
+    if kalshi_lines is not None and not kalshi_lines.empty:
+        games = games.merge(
+            kalshi_lines[["game_id", "kalshi_fullgame_line", "kalshi_f5_line", "f5_ratio"]],
+            on="game_id",
+            how="left",
+        )
+
+    return games
 
 
 def _add_team_strength_features(
@@ -606,7 +671,7 @@ def _add_team_strength_features(
     # Stack into one row per team per game
     records: list[dict] = []
     for _, row in pairs.iterrows():
-        for side, my_team, opp_runs, my_runs in [
+        for _side, my_team, opp_runs, my_runs in [
             ("home", row["home_team"], row["away_runs_raw"], row["home_runs_raw"]),
             ("away", row["away_team"], row["home_runs_raw"], row["away_runs_raw"]),
         ]:
@@ -707,12 +772,15 @@ def _add_elo_features(games: pd.DataFrame, elo: pd.DataFrame) -> pd.DataFrame:
     return games
 
 
+# ── Statcast xERA (prior-season) ─────────────────────────────────────────────
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
 def build_features(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     db_path: str = "data/mlb.db",
     include_elo: bool = True,
 ) -> pd.DataFrame:
@@ -752,6 +820,7 @@ def build_features(
         parks = _load_park_factors(conn)
         weather = _load_weather(conn)
         odds = _load_odds(conn)
+        kalshi_lines = _load_kalshi_lines(conn)
         elo = _load_elo(conn) if include_elo else pd.DataFrame()
 
     if games.empty:
@@ -781,7 +850,7 @@ def build_features(
     logger.info("Weather features added")
 
     # ── F: Market signal ─────────────────────────────────────────────────────
-    games = _add_market_features(games, odds)
+    games = _add_market_features(games, odds, kalshi_lines)
     logger.info("Market features added")
 
     # ── G: Team strength ─────────────────────────────────────────────────────
@@ -801,6 +870,209 @@ def build_features(
     return games.reset_index(drop=True)
 
 
+# ── Predict-mode helpers ─────────────────────────────────────────────────────
+
+
+def _load_upcoming_games(conn, date: str) -> pd.DataFrame:
+    """Load scheduled/Preview games for a specific date (no scores yet)."""
+    sql = """
+        SELECT g.game_id, g.date, g.season,
+               g.home_team, g.away_team,
+               NULL as home_runs, NULL as away_runs, NULL as total_runs,
+               NULL as f5_home_score, NULL as f5_away_score, NULL as f5_total_runs,
+               g.game_time_et
+        FROM games g
+        WHERE g.date = ? AND g.status IN ('Preview', 'Scheduled', 'Pre-Game', 'Warmup', 'Live')
+        ORDER BY g.game_time_et
+    """
+    rows = conn.execute(sql, (date,)).fetchall()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+def _fetch_probable_starters(date: str) -> pd.DataFrame:
+    """
+    Fetch probable starting pitcher IDs for all games on date via MLB Stats API.
+
+    Parameters
+    ----------
+    date : str
+        Game date YYYY-MM-DD.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: game_id (str), side ('home'|'away'), pitcher_id (int).
+        Empty if the API call fails or no probables are announced.
+    """
+    import requests
+
+    url = "https://statsapi.mlb.com/api/v1/schedule"
+    params = {"sportId": 1, "date": date, "hydrate": "probablePitcher"}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("Could not fetch probable pitchers for %s: %s", date, exc)
+        return pd.DataFrame(columns=["game_id", "side", "pitcher_id"])
+
+    rows = []
+    for date_entry in data.get("dates", []):
+        for game in date_entry.get("games", []):
+            game_pk = str(game.get("gamePk", ""))
+            for side in ("home", "away"):
+                pp = game.get("teams", {}).get(side, {}).get("probablePitcher", {})
+                if pp and pp.get("id"):
+                    rows.append(
+                        {"game_id": game_pk, "side": side, "pitcher_id": int(pp["id"])}
+                    )
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["game_id", "side", "pitcher_id"])
+
+
+def _make_synthetic_sp_rows(
+    upcoming: pd.DataFrame, probable: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Create synthetic sp_log rows for upcoming games so shift(1) can pull
+    the probable starter's most-recent season stats into the feature.
+
+    All per-game stat columns (er, ip, era_season, …) are NaN — the existing
+    _add_sp_features shift(1) logic will pick up the PREVIOUS row's values,
+    which are the starter's actual last-start stats.
+
+    Parameters
+    ----------
+    upcoming : pd.DataFrame
+        Output of _load_upcoming_games().
+    probable : pd.DataFrame
+        Columns: game_id, side, pitcher_id.  Side resolved to team abbreviation
+        by the caller.
+
+    Returns
+    -------
+    pd.DataFrame
+        Rows in the same schema as sp_log, to be appended before _add_sp_features.
+    """
+    if probable.empty or upcoming.empty:
+        return pd.DataFrame()
+
+    # Map side → team abbreviation using upcoming game data
+    home_sides = (
+        upcoming[["game_id", "home_team"]].rename(columns={"home_team": "team"}).assign(side="home")
+    )
+    away_sides = (
+        upcoming[["game_id", "away_team"]].rename(columns={"away_team": "team"}).assign(side="away")
+    )
+    game_sides = pd.concat([home_sides, away_sides])
+    probable = (
+        probable.merge(game_sides, on=["game_id", "side"], how="left").dropna(subset=["team"])
+    )
+    if probable.empty:
+        return pd.DataFrame()
+
+    date_map = upcoming.set_index("game_id")["date"].to_dict()
+    rows = []
+    for _, prob in probable.iterrows():
+        gid = prob["game_id"]
+        if gid not in date_map:
+            continue
+        rows.append(
+            {
+                "game_id": gid,
+                "pitcher_id": int(prob["pitcher_id"]),
+                "pitcher_name": f"probable_{int(prob['pitcher_id'])}",
+                "team": prob["team"],
+                "ip": np.nan,
+                "er": np.nan,
+                "era_season": np.nan,
+                "fip_season": np.nan,
+                "k9_season": np.nan,
+                "bb9_season": np.nan,
+                "hr9_season": np.nan,
+                "days_rest": np.nan,
+                "date": date_map[gid],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_predict_features(
+    date: str,
+    db_path: str = "data/mlb.db",
+    include_elo: bool = True,
+) -> pd.DataFrame:
+    """
+    Build features for upcoming (not yet played) games on date.
+
+    Uses the same no-leakage rolling pipeline as build_features(), but adds
+    synthetic sp_log rows for probable starters so the model gets real pitcher
+    stats (from their last start) instead of NaN imputation.
+
+    Parameters
+    ----------
+    date : str
+        Target date YYYY-MM-DD (games must be in 'Preview'/'Scheduled' status).
+    db_path : str
+    include_elo : bool
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per upcoming game on date.  Target columns (home_runs,
+        away_runs, total_runs) will be NaN — they haven't been played yet.
+        Empty DataFrame if no scheduled games found.
+    """
+    logger.info("Building predict features for %s", date)
+
+    with get_conn(db_path) as conn:
+        history = _load_games(conn, start_date=None, end_date=None)
+        upcoming = _load_upcoming_games(conn, date)
+        sp_log = _load_pitcher_game_log(conn)
+        relief_log = _load_relief_log(conn)
+        batting = _load_team_batting(conn)
+        parks = _load_park_factors(conn)
+        weather = _load_weather(conn)
+        odds = _load_odds(conn)
+        kalshi_lines = _load_kalshi_lines(conn)
+        elo = _load_elo(conn) if include_elo else pd.DataFrame()
+
+    if upcoming.empty:
+        logger.warning("No scheduled games found for %s", date)
+        return pd.DataFrame()
+
+    logger.info("Found %d upcoming games for %s", len(upcoming), date)
+
+    # Fetch probable starters and create synthetic sp_log rows
+    probable = _fetch_probable_starters(date)
+    synthetic = _make_synthetic_sp_rows(upcoming, probable)
+    if not synthetic.empty:
+        logger.info("Added %d probable-starter rows to sp_log", len(synthetic))
+        sp_log = pd.concat([sp_log, synthetic], ignore_index=True)
+
+    # Combine history + upcoming into a single games frame for rolling.
+    # Keep date as string (YYYY-MM-DD sorts correctly lexicographically).
+    # Upcoming games have NaN targets but are otherwise identical in schema.
+    games = pd.concat([history, upcoming], ignore_index=True)
+    games = games.sort_values(["date", "game_id"]).reset_index(drop=True)
+
+    # Run the full feature pipeline (computes rolling over all data)
+    games = _add_sp_features(games, sp_log)
+    games = _add_team_offense_features(games, batting)
+    games = _add_bullpen_features(games, relief_log)
+    games = _add_park_features(games, parks)
+    games = _add_weather_features(games, weather)
+    games = _add_market_features(games, odds, kalshi_lines)
+    games = _add_team_strength_features(games, batting)
+    if include_elo:
+        games = _add_elo_features(games, elo)
+
+    # Return only the target date's upcoming games
+    target_ids = set(upcoming["game_id"])
+    result = games[games["game_id"].isin(target_ids)].copy()
+    logger.info("Predict feature matrix: %d rows x %d cols", len(result), len(result.columns))
+    return result.reset_index(drop=True)
+
+
 # ── Feature column registry ───────────────────────────────────────────────────
 
 #: All feature column names in the output DataFrame (targets excluded).
@@ -812,7 +1084,8 @@ FEATURE_COLS: list[str] = [
     "home_sp_bb9_season", "away_sp_bb9_season",
     "home_sp_days_rest", "away_sp_days_rest",
     "home_sp_era_l3", "away_sp_era_l3",
-    "sp_fip_combined", "sp_k9_combined", "sp_era_l3_combined",
+    "home_sp_er_pg_l5", "away_sp_er_pg_l5",
+    "sp_fip_combined", "sp_k9_combined", "sp_era_l3_combined", "sp_er_pg_l5_combined",
     # B: Team offense
     "home_ops_10d", "away_ops_10d",
     "home_k_pct_10d", "away_k_pct_10d",
@@ -829,6 +1102,8 @@ FEATURE_COLS: list[str] = [
     "precip_prob", "humidity", "is_night_game",
     # F: Market
     "total_line_open", "total_line_close", "line_movement",
+    # F2: Kalshi cross-market (F5 vs full-game divergence signal)
+    "kalshi_fullgame_line", "kalshi_f5_line", "f5_ratio",
     # G: Team strength
     "home_win_pct_10d", "away_win_pct_10d",
     "home_run_diff_pg_season", "away_run_diff_pg_season",
@@ -836,7 +1111,10 @@ FEATURE_COLS: list[str] = [
     "elo_home", "elo_away",
 ]
 
-TARGET_COLS: list[str] = ["home_runs", "away_runs", "total_runs"]
+TARGET_COLS: list[str] = [
+    "home_runs", "away_runs", "total_runs",
+    "f5_home_score", "f5_away_score", "f5_total_runs",
+]
 ID_COLS: list[str] = ["game_id", "date", "season", "home_team", "away_team"]
 
 
