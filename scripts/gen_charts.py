@@ -26,142 +26,101 @@ BANKROLL = 100.0
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "docs", "images")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-SIZINGS = [
-    {
-        "label": "Flat 5%",
-        "sizing": "flat",
-        "flat_bet_pct": 0.05,
-        "kelly_mult": 0.25,
-        "kelly_cap": 0.05,
-        "color": "#888888",
-        "ls": "--",
-        "lw": 1.6,
-    },
-    {
-        "label": "Quarter Kelly  (0.25x, 5% cap)",
-        "sizing": "quarter_kelly",
-        "flat_bet_pct": 0.02,
-        "kelly_mult": 0.25,
-        "kelly_cap": 0.05,
-        "color": "#5B9BD5",
-        "ls": ":",
-        "lw": 1.8,
-    },
-    {
-        "label": "Half Kelly  (0.50x, 15% cap)  [production]",
-        "sizing": "quarter_kelly",
-        "flat_bet_pct": 0.02,
-        "kelly_mult": 0.50,
-        "kelly_cap": 0.15,
-        "color": "#70AD47",
-        "ls": "-",
-        "lw": 2.8,
-    },
-    {
-        "label": "Full Kelly  (1.0x, 15% cap)",
-        "sizing": "quarter_kelly",
-        "flat_bet_pct": 0.02,
-        "kelly_mult": 1.0,
-        "kelly_cap": 0.15,
-        "color": "#ED7D31",
-        "ls": "-.",
-        "lw": 1.8,
-    },
-]
-
-
-# ── Run simulations ───────────────────────────────────────────────────────────
-
-print("Running simulations…")
-results = []
-for cfg in SIZINGS:
-    tmp = f"/tmp/eq_{cfg['label'][:8].replace(' ', '_')}.csv"
-    r = simulate_structural(
-        start=START,
-        end=END,
-        filters=FILTERS,
-        sizing=cfg["sizing"],
-        flat_bet_pct=cfg.get("flat_bet_pct", 0.02),
-        kelly_mult=cfg["kelly_mult"],
-        kelly_cap=cfg["kelly_cap"],
-        initial_bankroll=BANKROLL,
-        output_path=tmp,
-    )
-    df = pd.read_csv(tmp)
-    df["date"] = pd.to_datetime(df["date"])
-    results.append({"cfg": cfg, "df": df, "r": r})
-    print(
-        f"  {cfg['label'][:40]:<40} "
-        f"${r['bankroll_final']:>8,.0f}  "
-        f"Sharpe {r['sharpe_annualised']:.2f}  "
-        f"DD {r['max_drawdown']:.1f}%"
-    )
-
-
-# ── Chart 1 — Equity curves ───────────────────────────────────────────────────
-
-fig, axes = plt.subplots(
-    2, 1, figsize=(12, 9),
-    gridspec_kw={"height_ratios": [3, 1], "hspace": 0.12},
-)
-
-ax_eq, ax_dd = axes
-
-for res in results:
-    cfg = res["cfg"]
-    df = res["df"]
-    r = res["r"]
-
-    dates = [pd.to_datetime(START)] + df["date"].tolist()
-    bankroll = np.array([BANKROLL] + df["bankroll_after"].tolist())
-    peak = np.maximum.accumulate(bankroll)
-    dd = (peak - bankroll) / peak * 100
-
-    label = (
-        f"{cfg['label']}\n"
-        f"  Final ${r['bankroll_final']:,.0f} · "
-        f"Sharpe {r['sharpe_annualised']:.2f} · "
-        f"DD -{r['max_drawdown']:.1f}%"
-    )
-    ax_eq.plot(dates, bankroll, label=label,
-               color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"])
-    ax_dd.plot(dates, -dd,
-               color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"] * 0.8, alpha=0.85)
-
-ax_eq.axhline(BANKROLL, color="black", linestyle=":", linewidth=0.9, alpha=0.35)
-ax_eq.set_ylabel("Bankroll ($)", fontsize=11)
-ax_eq.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.0f}"))
-ax_eq.legend(fontsize=8.5, loc="upper left", framealpha=0.9)
-ax_eq.grid(True, alpha=0.25)
-ax_eq.set_title(
-    "Structural Filter Strategy — Equity Curves by Bet Sizing\n"
-    "2021–2025 · day_k9_park + high_line + summer_hot_wind_out · DraftKings Closing Lines",
-    fontsize=12, pad=10,
-)
-
-ax_dd.set_ylabel("Drawdown (%)", fontsize=10)
-ax_dd.yaxis.set_major_formatter(mticker.StrMethodFormatter("{x:.0f}%"))
-ax_dd.set_xlabel("Date", fontsize=11)
-ax_dd.grid(True, alpha=0.25)
-ax_dd.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-ax_dd.xaxis.set_major_locator(mdates.YearLocator())
-
-fig.tight_layout()
-out1 = os.path.join(OUT_DIR, "equity_curves.png")
-fig.savefig(out1, dpi=150, bbox_inches="tight")
-plt.close(fig)
-print(f"\nSaved: {out1}")
-
-
-# ── Chart 2 — Per-filter breakdown (half Kelly only) ─────────────────────────
+PRODUCTION = {
+    "sizing": "quarter_kelly",
+    "kelly_mult": 0.50,
+    "kelly_cap": 0.15,
+}
 
 FILTER_CONFIGS = [
-    {"name": "day_k9_park",          "label": "day_k9_park\n(UNDER · 56.4%)",          "color": "#5B9BD5"},
-    {"name": "high_line",             "label": "high_line\n(UNDER · 57.5%)",             "color": "#70AD47"},
-    {"name": "summer_hot_wind_out",   "label": "summer_hot_wind_out\n(OVER · 63.1%)",    "color": "#ED7D31"},
-    {"name": "all",                   "label": "All Three Combined",                     "color": "#7030A0"},
+    {"name": "day_k9_park",        "label": "day_k9_park  (UNDER · 56.4%)",        "color": "#5B9BD5"},
+    {"name": "high_line",           "label": "high_line  (UNDER · 57.5%)",           "color": "#70AD47"},
+    {"name": "summer_hot_wind_out", "label": "summer_hot_wind_out  (OVER · 63.1%)", "color": "#ED7D31"},
+    {"name": "all",                 "label": "All Three Combined",                   "color": "#7030A0"},
 ]
 
+
+# ── Chart 1 — Production equity curve + drawdown ──────────────────────────────
+
+print("Running combined simulation (production)...")
+r_all = simulate_structural(
+    start=START, end=END,
+    filters=FILTERS,
+    output_path="/tmp/prod_all.csv",
+    initial_bankroll=BANKROLL,
+    **PRODUCTION,
+)
+df_all = pd.read_csv("/tmp/prod_all.csv")
+df_all["date"] = pd.to_datetime(df_all["date"])
+
+dates = [pd.to_datetime(START)] + df_all["date"].tolist()
+bankroll = np.array([BANKROLL] + df_all["bankroll_after"].tolist())
+peak = np.maximum.accumulate(bankroll)
+dd = (peak - bankroll) / peak * 100
+
+print(
+    f"  Combined: ${r_all['bankroll_final']:,.0f}  "
+    f"Sharpe {r_all['sharpe_annualised']:.2f}  "
+    f"Win rate {r_all['win_rate']:.1f}%  "
+    f"DD -{r_all['max_drawdown']:.1f}%  "
+    f"n={r_all['bets_placed']}"
+)
+
+fig, (ax_eq, ax_dd) = plt.subplots(
+    2, 1, figsize=(12, 8),
+    gridspec_kw={"height_ratios": [3, 1], "hspace": 0.05},
+)
+
+ax_eq.fill_between(dates, BANKROLL, bankroll,
+                   where=np.array(bankroll) >= BANKROLL,
+                   alpha=0.12, color="#70AD47")
+ax_eq.fill_between(dates, BANKROLL, bankroll,
+                   where=np.array(bankroll) < BANKROLL,
+                   alpha=0.15, color="#C00000")
+ax_eq.plot(dates, bankroll, color="#4472C4", linewidth=2.0)
+ax_eq.axhline(BANKROLL, color="black", linestyle=":", linewidth=0.9, alpha=0.4)
+
+# Annotate final value
+ax_eq.annotate(
+    f"${r_all['bankroll_final']:,.0f}",
+    xy=(dates[-1], bankroll[-1]),
+    xytext=(-60, 12), textcoords="offset points",
+    fontsize=11, fontweight="bold", color="#4472C4",
+    arrowprops=dict(arrowstyle="-", color="#4472C4", lw=1),
+)
+
+ax_eq.set_ylabel("Bankroll ($)", fontsize=11)
+ax_eq.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.0f}"))
+ax_eq.grid(True, alpha=0.22)
+ax_eq.set_title(
+    "Combined Structural Filter Strategy — Half Kelly (0.50x, 15% cap)\n"
+    "2021–2025  ·  DraftKings Closing Lines  ·  "
+    f"$100 start  |  Win rate {r_all['win_rate']:.1f}%  |  "
+    f"Sharpe {r_all['sharpe_annualised']:.2f}  |  "
+    f"{r_all['bets_placed']:,} bets",
+    fontsize=11, pad=8,
+)
+ax_eq.tick_params(labelbottom=False)
+
+ax_dd.fill_between(dates, 0, -dd, color="#C00000", alpha=0.35)
+ax_dd.plot(dates, -dd, color="#C00000", linewidth=1.0, alpha=0.7)
+ax_dd.set_ylabel("Drawdown", fontsize=10)
+ax_dd.yaxis.set_major_formatter(mticker.StrMethodFormatter("{x:.0f}%"))
+ax_dd.set_xlabel("Date", fontsize=11)
+ax_dd.grid(True, alpha=0.22)
+ax_dd.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+ax_dd.xaxis.set_major_locator(mdates.YearLocator())
+ax_dd.set_ylim(top=5)
+
+out1 = os.path.join(OUT_DIR, "equity_curve.png")
+fig.savefig(out1, dpi=150, bbox_inches="tight")
+plt.close(fig)
+print(f"Saved: {out1}")
+
+
+# ── Chart 2 — Per-filter breakdown (production sizing) ────────────────────────
+
+print("\nRunning per-filter simulations...")
 fig2, ax2 = plt.subplots(figsize=(12, 5.5))
 
 for fc in FILTER_CONFIGS:
@@ -170,26 +129,25 @@ for fc in FILTER_CONFIGS:
     r2 = simulate_structural(
         start=START, end=END,
         filters=filt,
-        sizing="quarter_kelly",
-        kelly_mult=0.50,
-        kelly_cap=0.15,
         initial_bankroll=BANKROLL,
         output_path=tmp,
+        **PRODUCTION,
     )
     df2 = pd.read_csv(tmp)
     df2["date"] = pd.to_datetime(df2["date"])
-    dates = [pd.to_datetime(START)] + df2["date"].tolist()
-    bk = [BANKROLL] + df2["bankroll_after"].tolist()
-    lw = 2.8 if fc["name"] == "all" else 1.6
+    dates2 = [pd.to_datetime(START)] + df2["date"].tolist()
+    bk2 = [BANKROLL] + df2["bankroll_after"].tolist()
+    lw = 2.5 if fc["name"] == "all" else 1.5
     ls = "-" if fc["name"] == "all" else "--"
     label = (
-        f"{fc['label'].replace(chr(10), ' · ')}\n"
-        f"  Final ${r2['bankroll_final']:,.0f} · "
-        f"Win rate {r2['win_rate']:.1f}% · "
+        f"{fc['label']}   "
+        f"${r2['bankroll_final']:,.0f}  |  "
+        f"Win {r2['win_rate']:.1f}%  |  "
         f"n={r2['bets_placed']}"
     )
-    ax2.plot(dates, bk, label=label,
+    ax2.plot(dates2, bk2, label=label,
              color=fc["color"], linestyle=ls, linewidth=lw)
+    print(f"  {fc['label'][:35]:<35} ${r2['bankroll_final']:>7,.0f}  Win {r2['win_rate']:.1f}%  n={r2['bets_placed']}")
 
 ax2.axhline(BANKROLL, color="black", linestyle=":", linewidth=0.9, alpha=0.35)
 ax2.set_ylabel("Bankroll ($)", fontsize=11)
@@ -197,12 +155,11 @@ ax2.set_xlabel("Date", fontsize=11)
 ax2.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.0f}"))
 ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 ax2.xaxis.set_major_locator(mdates.YearLocator())
-ax2.legend(fontsize=8.5, loc="upper left", framealpha=0.9)
-ax2.grid(True, alpha=0.25)
+ax2.legend(fontsize=9, loc="upper left", framealpha=0.92)
+ax2.grid(True, alpha=0.22)
 ax2.set_title(
-    "Equity Curves by Filter — Half Kelly (0.50×, 15% cap)\n"
-    "2021–2025 · DraftKings Closing Lines",
-    fontsize=12, pad=10,
+    "Equity by Filter — Half Kelly (0.50x, 15% cap)  ·  2021–2025  ·  DraftKings Closing Lines",
+    fontsize=11, pad=8,
 )
 fig2.tight_layout()
 out2 = os.path.join(OUT_DIR, "filter_breakdown.png")
@@ -213,26 +170,37 @@ print(f"Saved: {out2}")
 
 # ── Chart 3 — Win rate bar chart ──────────────────────────────────────────────
 
-fig3, ax3 = plt.subplots(figsize=(8, 4.5))
+print("\nGenerating win rate chart...")
+fig3, ax3 = plt.subplots(figsize=(9, 5))
 
-filters_display = ["day_k9_park\n(UNDER)", "high_line\n(UNDER)", "summer_hot_wind_out\n(OVER)", "All Three\nCombined"]
+labels   = ["day_k9_park\n(UNDER)", "high_line\n(UNDER)", "summer_hot_wind_out\n(OVER)", "All Three\nCombined"]
 win_rates = [56.4, 57.5, 63.1, 57.4]
-samples   = [906, 373, 134, 1413]
+samples   = [906,  373,  134,  1413]
 colors    = ["#5B9BD5", "#70AD47", "#ED7D31", "#7030A0"]
 
-bars = ax3.bar(filters_display, win_rates, color=colors, width=0.55, edgecolor="white", linewidth=1.2)
-ax3.axhline(52.38, color="#C00000", linestyle="--", linewidth=1.4, label="Break-even at −110 (52.38%)")
-ax3.axhline(50.0, color="black", linestyle=":", linewidth=0.9, alpha=0.4, label="Coin flip (50%)")
+bars = ax3.bar(labels, win_rates, color=colors, width=0.55,
+               edgecolor="white", linewidth=1.2, zorder=3)
+ax3.axhline(52.38, color="#C00000", linestyle="--", linewidth=1.6,
+            label="Break-even at -110  (52.38%)", zorder=4)
+ax3.axhline(50.0, color="black", linestyle=":", linewidth=0.9,
+            alpha=0.4, label="Coin flip  (50.0%)", zorder=4)
 
 for bar, wr, n in zip(bars, win_rates, samples):
-    ax3.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
-             f"{wr:.1f}%\nn={n:,}", ha="center", va="bottom", fontsize=9.5, fontweight="bold")
+    ax3.text(
+        bar.get_x() + bar.get_width() / 2,
+        bar.get_height() + 0.35,
+        f"{wr:.1f}%\nn={n:,}",
+        ha="center", va="bottom", fontsize=10, fontweight="bold",
+    )
 
-ax3.set_ylim(45, 68)
+ax3.set_ylim(45, 70)
 ax3.set_ylabel("Win Rate (%)", fontsize=11)
-ax3.set_title("Filter Win Rates vs Break-Even · 2021–2025 · DraftKings", fontsize=12)
-ax3.legend(fontsize=9)
-ax3.grid(axis="y", alpha=0.3)
+ax3.set_title(
+    "Filter Win Rates vs Break-Even at -110\n2021–2025  ·  DraftKings Closing Lines",
+    fontsize=12, pad=8,
+)
+ax3.legend(fontsize=9.5, loc="upper left")
+ax3.grid(axis="y", alpha=0.25, zorder=0)
 ax3.spines["top"].set_visible(False)
 ax3.spines["right"].set_visible(False)
 fig3.tight_layout()
