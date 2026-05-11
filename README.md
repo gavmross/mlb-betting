@@ -28,6 +28,18 @@ Kelly fraction for the UNDER filters (~4–5%) bets less than a fixed 5% stake,
 while half Kelly correctly sizes the high-edge summer OVER filter at ~11.3%
 instead of being artificially capped at 5%.
 
+### Equity Curves by Bet Sizing
+
+![Equity curves and drawdown by bet sizing strategy](docs/images/equity_curves.png)
+
+### Win Rates vs Break-Even
+
+![Win rate by filter vs break-even at −110](docs/images/win_rates.png)
+
+### Equity Curves by Filter (Half Kelly)
+
+![Per-filter equity curves on half Kelly](docs/images/filter_breakdown.png)
+
 ---
 
 ## The Three Structural Filters
