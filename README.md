@@ -8,6 +8,44 @@ prediction market.
 
 ---
 
+## Data Foundation
+
+The filters and model were developed on a purpose-built database covering
+**12 MLB seasons (2015–2026)**. Every data source is scraped, cleaned, and
+stored locally — nothing is sampled or estimated.
+
+| Dataset | Rows | Source | Used for |
+|---|---|---|---|
+| Game results | 25,749 | MLB Stats API + pybaseball | Targets, rolling team stats |
+| Pitcher game logs | 220,532 | pybaseball | SP ERA, FIP, K/9, BB/9, rest days, last-N form |
+| Team batting logs | 51,504 | pybaseball | Rolling OPS, K%, runs scored per game |
+| Sportsbook odds | 59,339 | sbrscrape (5 books) | Closing lines — DK, FanDuel, Caesars, Bet365, BetMGM |
+| Weather observations | 12,702 | Open-Meteo | Temperature, wind speed, wind direction at first pitch |
+| Elo ratings | 51,386 | Computed daily | Team strength signal — zero-sum, updated after every game |
+| Kalshi market snapshots | 11,811 | Kalshi REST API | Live pricing for live execution |
+| Pitcher Statcast | 3,938 | pybaseball / Baseball Savant | xERA, estimated wOBA |
+
+**The pitcher game log is the most important dataset.** With 220,532 rows
+spanning 12 seasons, it provides enough history to compute stable rolling ERA,
+K/9, and form metrics for every starting pitcher — even ones with partial seasons
+or mid-year call-ups. This depth is what makes the day_k9_park filter reliable:
+a combined K/9 threshold of 14.0+ is only trustworthy when the denominator is
+large enough to distinguish signal from variance.
+
+**Odds coverage across five sportsbooks (2021–2026)** lets the system use each
+book's closing line as an independent signal rather than relying on any single
+market. DraftKings is used as the backtest benchmark because it has the deepest
+US retail liquidity and its lines best represent the prices a bettor can actually
+obtain.
+
+**Weather data is fetched at the game-level**, not the city-level — each entry
+is tied to a specific game with the stadium's exact coordinates and outfield
+orientation. Wind direction is encoded relative to the stadium's home-plate-to-CF
+axis, so "blowing out" means *toward the outfield* for that specific park, not
+just a compass bearing.
+
+---
+
 ## The Edge: Three Structural Filters
 
 Most MLB betting research focuses on predicting game outcomes. This system takes
